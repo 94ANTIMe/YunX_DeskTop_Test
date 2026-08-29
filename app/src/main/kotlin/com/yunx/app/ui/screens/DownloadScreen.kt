@@ -1,6 +1,9 @@
 package com.yunx.app.ui.screens
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -16,6 +19,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ExpandLess
@@ -156,7 +161,8 @@ fun DownloadScreen(
                             stats = stats[task.id],
                             onPause = { viewModel.pause(task.id) },
                             onResume = { viewModel.resume(task.id) },
-                            onRemove = { pendingDelete = task }
+                            onRemove = { pendingDelete = task },
+                            onRedownload = { viewModel.redownload(task) }
                         )
                     }
 
@@ -168,7 +174,8 @@ fun DownloadScreen(
                                 stats = stats,
                                 onPause = { viewModel.pause(it) },
                                 onResume = { viewModel.resume(it) },
-                                onRemove = { pendingDelete = it }
+                                onRemove = { pendingDelete = it },
+                                onRedownload = { viewModel.redownload(it) }
                             )
                         }
                     }
@@ -411,7 +418,8 @@ private fun FolderDownloadGroup(
     stats: Map<Long, DownloadStats>,
     onPause: (Long) -> Unit,
     onResume: (Long) -> Unit,
-    onRemove: (DownloadTaskEntity) -> Unit
+    onRemove: (DownloadTaskEntity) -> Unit,
+    onRedownload: (DownloadTaskEntity) -> Unit
 ) {
     var expanded by remember { mutableStateOf(true) }
     val completed = tasks.count { it.status == DownloadTaskEntity.STATUS_COMPLETED }
@@ -506,17 +514,19 @@ private fun FolderDownloadGroup(
                 exit = fadeOut(tween(150)) + shrinkVertically(tween(150), shrinkTowards = Alignment.Top)
             ) {
                 Column {
-                    // 总体进度条（细条，圆角）
-                    LinearProgressIndicator(
-                        progress = { fraction },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp)
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-                    )
+                    // 总体进度条（已完成时隐藏）
+                    if (!done) {
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
+                    }
                     // 子任务列表（紧凑行，含子文件夹内文件）
                     Column(
                         modifier = Modifier.padding(10.dp),
@@ -528,7 +538,8 @@ private fun FolderDownloadGroup(
                                 stats = stats[task.id],
                                 onPause = { onPause(task.id) },
                                 onResume = { onResume(task.id) },
-                                onRemove = { onRemove(task) }
+                                onRemove = { onRemove(task) },
+                                onRedownload = { onRedownload(task) }
                             )
                         }
                     }
@@ -548,7 +559,8 @@ private fun DownloadSubTaskRow(
     stats: DownloadStats?,
     onPause: () -> Unit,
     onResume: () -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    onRedownload: () -> Unit
 ) {
     val context = LocalContext.current
     val isDownloading = task.status == DownloadTaskEntity.STATUS_DOWNLOADING ||
@@ -558,9 +570,17 @@ private fun DownloadSubTaskRow(
     } else 0f
     // 显示相对路径（去掉顶级目录前缀，如 "A/B/b.mp4" → "B/b.mp4"）
     val displayName = task.fileName.substringAfter('/')
+    // 长按任务行弹出操作菜单（复制直链 / 重新下载 / 删除）
+    var showMenu by remember { mutableStateOf(false) }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .combinedClickable(
+                onClick = {},
+                onLongClick = { showMenu = true }
+            ),
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceContainer
     ) {
@@ -591,10 +611,12 @@ private fun DownloadSubTaskRow(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = if (isDownloading && stats != null && stats.speed > 0) {
-                            "${DownloadTaskEntity.statusText(task.status)} · ${formatSpeed(stats.speed)}"
-                        } else {
-                            taskStatusLine(task)
+                        text = when {
+                            isDownloading && stats != null && stats.speed > 0 ->
+                                "${DownloadTaskEntity.statusText(task.status)} · ${formatSpeed(stats.speed)}"
+                            task.status == DownloadTaskEntity.STATUS_COMPLETED && task.avgSpeed > 0 ->
+                                "${DownloadTaskEntity.statusText(task.status)} · 平均 ${formatSpeed(task.avgSpeed)}"
+                            else -> taskStatusLine(task)
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (task.status == DownloadTaskEntity.STATUS_FAILED) {
@@ -643,20 +665,73 @@ private fun DownloadSubTaskRow(
                     )
                 }
             }
-            // 细进度条
-            LinearProgressIndicator(
-                progress = { if (task.status == DownloadTaskEntity.STATUS_COMPLETED) 1f else fraction },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 6.dp)
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(1.5f)),
-                color = if (task.status == DownloadTaskEntity.STATUS_FAILED) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.primary
+            // 细进度条（完成态折叠，带过渡动画）
+            AnimatedVisibility(
+                visible = task.status != DownloadTaskEntity.STATUS_COMPLETED,
+                enter = expandVertically(tween(200)) + fadeIn(tween(200)),
+                exit = shrinkVertically(tween(200)) + fadeOut(tween(150))
+            ) {
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(1.5f)),
+                    color = if (task.status == DownloadTaskEntity.STATUS_FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                )
+            }
+        }
+
+        // 长按任务行弹出操作菜单（复制直链 / 重新下载 / 删除）
+        if (showMenu) {
+            AlertDialog(
+                onDismissRequest = { showMenu = false },
+                title = {
+                    Text(
+                        text = displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 },
-                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                text = {
+                    Column {
+                        TextButton(onClick = {
+                            showMenu = false
+                            copyToClipboard(context, task.url)
+                            SnackbarController.show("直链已复制")
+                        }) {
+                            Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("复制直链")
+                        }
+                        TextButton(onClick = {
+                            showMenu = false
+                            onRedownload()
+                        }) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("重新下载")
+                        }
+                        TextButton(onClick = {
+                            showMenu = false
+                            onRemove()
+                        }) {
+                            Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("删除任务")
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showMenu = false }) { Text("取消") }
+                }
             )
         }
     }
@@ -668,7 +743,8 @@ private fun DownloadTaskCard(
     stats: DownloadStats?,
     onPause: () -> Unit,
     onResume: () -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    onRedownload: () -> Unit
 ) {
     val context = LocalContext.current
     val isDownloading = task.status == DownloadTaskEntity.STATUS_DOWNLOADING ||
@@ -676,9 +752,17 @@ private fun DownloadTaskCard(
     val fraction = if (task.totalSize > 0) {
         (task.downloadedSize.toFloat() / task.totalSize).coerceIn(0f, 1f)
     } else 0f
+    // 长按任务卡弹出操作菜单（复制直链 / 重新下载 / 删除）
+    var showMenu by remember { mutableStateOf(false) }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.large)
+            .combinedClickable(
+                onClick = {},
+                onLongClick = { showMenu = true }
+            ),
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -762,36 +846,48 @@ private fun DownloadTaskCard(
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
-            // 实时统计：速度 / 剩余时间 / 线程数
-            if (isDownloading && stats != null && stats.speed > 0) {
-                Text(
-                    text = "${formatSpeed(stats.speed)} · 剩余 ${formatRemain(stats.remainMillis)} · ${stats.chunkCount} 线程",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(6.dp))
+            // 实时统计 + 进度条：完成态整体折叠（带高度过渡动画，不残留空白）
+            AnimatedVisibility(
+                visible = task.status != DownloadTaskEntity.STATUS_COMPLETED,
+                enter = expandVertically(tween(200)) + fadeIn(tween(200)),
+                exit = shrinkVertically(tween(200)) + fadeOut(tween(150))
+            ) {
+                Column {
+                    if (isDownloading && stats != null && stats.speed > 0) {
+                        Text(
+                            text = "${formatSpeed(stats.speed)} · 剩余 ${formatRemain(stats.remainMillis)} · ${stats.chunkCount} 线程",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = when (task.status) {
+                            DownloadTaskEntity.STATUS_FAILED -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.primary
+                        },
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
             }
-
-            // 进度条
-            LinearProgressIndicator(
-                progress = { if (isDownloading) fraction else if (task.status == DownloadTaskEntity.STATUS_COMPLETED) 1f else fraction },
-                modifier = Modifier.fillMaxWidth(),
-                color = when (task.status) {
-                    DownloadTaskEntity.STATUS_COMPLETED -> MaterialTheme.colorScheme.primary
-                    DownloadTaskEntity.STATUS_FAILED -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.primary
-                },
-                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = progressText(task),
+                    text = if (task.status == DownloadTaskEntity.STATUS_COMPLETED) {
+                        if (task.avgSpeed > 0) {
+                            "平均 ${formatSpeed(task.avgSpeed)} · ${formatSize(task.totalSize)}"
+                        } else {
+                            formatSize(task.totalSize)
+                        }
+                    } else {
+                        progressText(task)
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f)
@@ -808,7 +904,59 @@ private fun DownloadTaskCard(
                 }
             }
         }
+
+        // 长按任务卡弹出操作菜单（复制直链 / 重新下载 / 删除）
+        if (showMenu) {
+            AlertDialog(
+                onDismissRequest = { showMenu = false },
+                title = {
+                    Text(
+                        text = task.fileName,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                text = {
+                    Column {
+                        TextButton(onClick = {
+                            showMenu = false
+                            copyToClipboard(context, task.url)
+                            SnackbarController.show("直链已复制")
+                        }) {
+                            Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("复制直链")
+                        }
+                        TextButton(onClick = {
+                            showMenu = false
+                            onRedownload()
+                        }) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("重新下载")
+                        }
+                        TextButton(onClick = {
+                            showMenu = false
+                            onRemove()
+                        }) {
+                            Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("删除任务")
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showMenu = false }) { Text("取消") }
+                }
+            )
+        }
     }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText("yunx_url", text))
 }
 
 private fun taskStatusLine(task: DownloadTaskEntity): String {

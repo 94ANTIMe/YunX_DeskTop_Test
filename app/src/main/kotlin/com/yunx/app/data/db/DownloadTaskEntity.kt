@@ -32,6 +32,12 @@ data class DownloadTaskEntity(
     /** 下载完成/删除任务后应清理的云端临时目录 ID（当前为夸克） */
     @ColumnInfo(defaultValue = "''")
     val cleanupId: String = "",
+    /** 下载来源平台标识（用于按平台应用下载线程数设置）；通用/手动添加为空串 */
+    @ColumnInfo(defaultValue = "''")
+    val platform: String = "",
+    /** 下载完成时的平均速度（字节/秒）；完成态展示用，进行中为 0 */
+    @ColumnInfo(defaultValue = "0")
+    val avgSpeed: Long = 0,
     val createTime: Long = System.currentTimeMillis()
 ) {
     companion object {
