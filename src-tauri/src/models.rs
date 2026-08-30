@@ -125,6 +125,18 @@ pub struct Settings {
     pub pansou_base_url: String,
     /// 深色模式：0 跟随系统 / 1 浅色 / 2 深色
     pub dark_mode: i32,
+    /// 启动时自动检查在线更新（GitHub Releases）
+    pub auto_check_update: bool,
+    /// 剪贴板监听：复制分享链接自动提示解析（默认关）
+    pub clipboard_monitor: bool,
+    /// 最小化到系统托盘（常驻后台，默认开）
+    pub minimize_to_tray: bool,
+    /// 下载完成/失败系统通知（默认开）
+    pub download_notify: bool,
+    /// 开机自启（默认关）
+    pub auto_launch: bool,
+    /// 导航胶囊显示「搜索」Tab（默认关）
+    pub show_search_tab: bool,
 }
 
 impl Default for Settings {
@@ -139,6 +151,12 @@ impl Default for Settings {
             download_conn_per_server: 16,
             pansou_base_url: String::new(),
             dark_mode: 0,
+            auto_check_update: true,
+            clipboard_monitor: false,
+            minimize_to_tray: true,
+            download_notify: true,
+            auto_launch: false,
+            show_search_tab: false,
         }
     }
 }
@@ -184,6 +202,30 @@ impl DownloadTaskView {
     pub const STATUS_PAUSED: i32 = 2;
     pub const STATUS_COMPLETED: i32 = 3;
     pub const STATUS_FAILED: i32 = 4;
+}
+
+/// 下载任务 Dashboard 详情（任务卡片点开后的扩展数据）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadDetail {
+    pub id: i64,
+    pub gid: String,
+    pub url: String,
+    pub file_name: String,
+    pub platform: String,
+    pub total_size: i64,
+    pub downloaded_size: i64,
+    pub speed: i64,
+    pub status: i32,
+    pub error_msg: String,
+    pub save_path: String,
+    pub create_time: i64,
+    /// 当前分片连接数
+    pub connections: i32,
+    /// 上传速度（字节/秒）
+    pub upload_speed: i64,
+    /// 已耗时（秒）
+    pub total_time: i64,
 }
 
 /// 收藏的网盘链接（对齐 bookmark 表）

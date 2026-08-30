@@ -21,6 +21,8 @@ pub struct AppState {
     pub xunlei: Mutex<XunleiRuntime>,
     /// 应用数据目录（settings.json / xunlei_fp.json）
     pub data_dir: PathBuf,
+    /// 更新流程单飞锁（防重复检查/下载/安装）
+    pub updating: Mutex<bool>,
 }
 
 impl AppState {
@@ -41,6 +43,7 @@ impl AppState {
             sessions: Mutex::new(std::collections::HashMap::new()),
             xunlei: Mutex::new(XunleiRuntime { fp: xunlei_fp, ..Default::default() }),
             data_dir: data_dir.to_path_buf(),
+            updating: Mutex::new(false),
         })
     }
 

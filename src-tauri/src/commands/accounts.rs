@@ -13,13 +13,15 @@ pub fn list_accounts(app: AppHandle) -> AppResult<Vec<AccountSummary>> {
     crate::db::accounts::list_summaries(&conn)
 }
 
-/// 登出平台账号
+/// 登出平台账号（同时清空该平台登录窗口的 WebView2 Cookie，避免自动回登）
 #[tauri::command]
 pub fn logout(app: AppHandle, platform: String) -> AppResult<()> {
     let state = app.state::<AppState>();
     let platform = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     crate::db::accounts::delete(&conn, platform)?;
+    // 清空登录专用 WebView2 数据目录（防旧账号会话残留自动回登）
+    crate::login::clear_login_profile(&app, platform);
     // 迅雷登出同时清运行时
     if platform == Platform::Xunlei {
         if let Ok(mut rt) = state.xunlei.lock() {

@@ -10,11 +10,25 @@ pub fn get_settings(app: AppHandle) -> Settings {
     app.state::<AppState>().load_settings()
 }
 
-/// 更新设置（持久化 + 同步 aria2 限速/并发）
+/// 更新设置（持久化 + 同步 aria2 限速/并发 + 开机自启）
 #[tauri::command]
 pub async fn update_settings(app: AppHandle, settings: Settings) -> AppResult<()> {
+    use tauri_plugin_autostart::ManagerExt;
+
     let state = app.state::<AppState>();
+    let prev = state.load_settings();
     state.save_settings(&settings)?;
     crate::aria2::apply_settings(&app, &settings).await;
+    // 开机自启状态与操作系统对齐（仅在值变化时写，避免每次保存都触发注册表写入）
+    if prev.auto_launch != settings.auto_launch {
+        let res = if settings.auto_launch {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        if let Err(e) = res {
+            state.log(crate::logger::ERROR, "app", "autostart", "设置开机自启失败", &e.to_string());
+        }
+    }
     Ok(())
 }

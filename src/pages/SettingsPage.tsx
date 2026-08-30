@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, ExternalLink, FolderOpen, Loader2, RefreshCw, Search } from "lucide-react";
+import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Loader2, Minimize2, Power, RefreshCw, Search } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
 import { useUpdate } from "../hooks/useUpdate";
@@ -11,6 +11,47 @@ import type { TabId } from "../lib/tabs";
 import aboutHero from "../assets/art/about-lighthouse.jpg";
 
 const GITHUB_URL = "https://github.com/CYQawa/YunX";
+
+/** 开关行（通用设置区块复用） */
+function ToggleRow({
+  icon: Icon,
+  title,
+  desc,
+  checked,
+  onChange,
+}: {
+  icon: typeof Bell;
+  title: string;
+  desc: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <Icon size={16} className="mt-0.5 shrink-0 text-clay" strokeWidth={1.8} />
+        <div className="min-w-0">
+          <p className="text-sm text-ink-soft">{title}</p>
+          <p className="mt-0.5 text-xs text-ink-soft/70">{desc}</p>
+        </div>
+      </div>
+      <button
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+          checked ? "bg-clay" : "bg-ink/15"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+            checked ? "left-[22px]" : "left-0.5"
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
 
 /** 本项目所依赖 / 参考的开源项目（设置页「开源致谢」区块） */
 const ACKNOWLEDGEMENTS = [
@@ -155,6 +196,46 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
           ))}
         </div>
       </section>
+
+      {/* 通用 */}
+      {s && (
+        <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "90ms" }}>
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-ink">通用</h3>
+            {saving && <Loader2 size={14} className="animate-spin text-clay" />}
+          </div>
+          <div className="mt-2 divide-y divide-ink/10">
+            <ToggleRow
+              icon={ClipboardPaste}
+              title="剪贴板监听"
+              desc="复制夸克 / UC / 百度等分享链接时自动提示解析"
+              checked={s.clipboardMonitor}
+              onChange={(v) => persist({ ...s, clipboardMonitor: v })}
+            />
+            <ToggleRow
+              icon={Minimize2}
+              title="最小化到系统托盘"
+              desc="关闭窗口不退出，下载在后台继续；托盘右键可唤起 / 暂停 / 继续"
+              checked={s.minimizeToTray}
+              onChange={(v) => persist({ ...s, minimizeToTray: v })}
+            />
+            <ToggleRow
+              icon={Bell}
+              title="下载完成通知"
+              desc="任务完成 / 失败时弹出系统通知"
+              checked={s.downloadNotify}
+              onChange={(v) => persist({ ...s, downloadNotify: v })}
+            />
+            <ToggleRow
+              icon={Power}
+              title="开机自启"
+              desc="开机自动启动云析并拉起 aria2 下载引擎"
+              checked={s.autoLaunch}
+              onChange={(v) => persist({ ...s, autoLaunch: v })}
+            />
+          </div>
+        </section>
+      )}
 
       {/* 下载 */}
       {s && (
@@ -355,6 +436,15 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
           <p className="mt-3 text-xs text-ink-soft/70">
             PanSou 是可自部署的网盘聚合搜索服务（fish2018/pansou），填入服务根地址后即可在「搜索」页搜全网公开分享资源；留空则关闭搜索功能。
           </p>
+          <div className="mt-2 divide-y divide-ink/10 border-t border-ink/10 pt-1">
+            <ToggleRow
+              icon={Search}
+              title="在导航栏显示「搜索」页"
+              desc="开启后顶部胶囊出现「搜索」栏目；关闭则隐藏入口（服务地址保留）"
+              checked={s.showSearchTab}
+              onChange={(v) => persist({ ...s, showSearchTab: v })}
+            />
+          </div>
         </section>
       )}
 

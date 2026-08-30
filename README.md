@@ -71,6 +71,16 @@ pnpm tauri build
 - [TurboDL](https://github.com/henrique-coder/turbodl) — 多线程分片下载优化参考
 - [YunX](https://github.com/CYQawa/YunX) — 云析 Android 版（同源项目）
 
+## ⚠️ License Notice / 协议声明
+
+本项目基于 [CYQawa/YunX](https://github.com/CYQawa/YunX) 进行二次开发，严格继承并遵循原作者的 **AGPL-3.0** 开源协议。
+
+任何基于本项目的衍生作品，在网络服务或分发时，均必须遵守 AGPL-3.0 的开源义务。
+
+## 免责声明
+
+本项目仅供个人学习与技术交流，请勿用于商业用途。下载内容版权归原作者所有，请在下载后 24 小时内删除。使用本项目产生的任何后果由使用者自行承担。
+
 ## 📄 License
 
-[GPL-2.0](LICENSE)
+[AGPL-3.0](LICENSE)

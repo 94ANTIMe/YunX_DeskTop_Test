@@ -6,10 +6,11 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::ShellExt;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{DownloadTaskView, Settings};
+use crate::models::{DownloadDetail, DownloadTaskView, Settings};
 use crate::state::AppState;
 
 const RPC_PORT: u16 = 16800;
@@ -354,6 +355,43 @@ pub async fn clear_all(app: &AppHandle) -> AppResult<()> {
     Ok(())
 }
 
+/// 暂停全部进行中/等待任务（aria2.pauseAll + DB 置暂停态 + 事件）
+pub async fn pause_all(app: &AppHandle) -> AppResult<()> {
+    let _ = rpc_call("aria2.pauseAll", vec![]).await;
+    let state = app.state::<AppState>();
+    {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.execute(
+            "UPDATE download_task SET status = ?1 WHERE status IN (0, 1)",
+            rusqlite::params![DownloadTaskView::STATUS_PAUSED],
+        )?;
+    }
+    push_list(app).await;
+    Ok(())
+}
+
+/// 继续全部暂停任务（aria2.unpauseAll + DB 置下载态 + 事件）
+pub async fn resume_all(app: &AppHandle) -> AppResult<()> {
+    let _ = rpc_call("aria2.unpauseAll", vec![]).await;
+    let state = app.state::<AppState>();
+    {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.execute(
+            "UPDATE download_task SET status = ?1 WHERE status = ?2",
+            rusqlite::params![DownloadTaskView::STATUS_DOWNLOADING, DownloadTaskView::STATUS_PAUSED],
+        )?;
+    }
+    push_list(app).await;
+    Ok(())
+}
+
+/// 拉取全量任务并向前端推送（pause_all / resume_all 用）
+async fn push_list(app: &AppHandle) {
+    if let Ok(views) = list_tasks(app) {
+        let _ = app.emit("downloads:updated", &views);
+    }
+}
+
 // ---------- 工具 ----------
 
 fn gid_of(app: &AppHandle, id: i64) -> AppResult<String> {
@@ -513,6 +551,15 @@ async fn poll_loop(app: AppHandle) {
                     &format!("下载完成：{file_name}"),
                     &format!("任务 #{id} size={} save={}", status.total, save_path),
                 );
+                // 下载完成系统通知（开关控制）
+                if state.load_settings().download_notify {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("下载完成")
+                        .body(file_name.clone())
+                        .show();
+                }
                 if platform == "quark" && !cleanup_id.is_empty() {
                     let state_ref = app.state::<AppState>();
                     crate::resolve::cleanup_quark(&state_ref, &cleanup_id).await;
@@ -533,6 +580,15 @@ async fn poll_loop(app: AppHandle) {
                     &format!("下载失败：{file_name}"),
                     &format!("任务 #{id} {}", status.error_msg),
                 );
+                // 下载失败系统通知（开关控制）
+                if state.load_settings().download_notify {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("下载失败")
+                        .body(format!("{file_name} · {}", status.error_msg))
+                        .show();
+                }
             } else if persist_due {
                 // 节流持久化进度
                 let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -562,6 +618,10 @@ async fn poll_loop(app: AppHandle) {
             last_persist = std::time::Instant::now();
         }
         let _ = app.emit("downloads:updated", &views);
+        // 托盘 tooltip 汇总进行中任务数与总速度
+        let active_count = views.iter().filter(|v| v.status == DownloadTaskView::STATUS_DOWNLOADING).count();
+        let total_speed: i64 = views.iter().map(|v| v.speed).sum();
+        crate::tray::update_speed(&app, active_count, total_speed);
     }
 }
 
@@ -593,6 +653,62 @@ pub fn list_tasks(app: &AppHandle) -> AppResult<Vec<DownloadTaskView>> {
         .filter_map(Result::ok)
         .collect();
     Ok(rows)
+}
+
+/// 拉取单个任务完整详情（含 aria2 tellStatus 扩展字段，供 Dashboard 面板）
+pub async fn detail(app: &AppHandle, id: i64) -> AppResult<DownloadDetail> {
+    use rusqlite::OptionalExtension;
+    let state = app.state::<AppState>();
+    let row: Option<(String, String, String, String, i64, i64, i32, String, String, i64)> = {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.query_row(
+            "SELECT gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time \
+             FROM download_task WHERE id = ?1",
+            rusqlite::params![id],
+            |r| {
+                Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+                ))
+            },
+        )
+        .optional()?
+    };
+
+    let (
+        gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time,
+    ) = row.unwrap_or_default();
+
+    let mut connections = 0i32;
+    let mut upload_speed = 0i64;
+    let mut total_time = 0i64;
+    let mut speed = 0i64;
+    if !gid.is_empty() {
+        if let Ok(v) = rpc_call("aria2.tellStatus", vec![json!(gid)]).await {
+            speed = parse_status(&v).speed;
+            total_time = v.get("totalTime").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0);
+            connections = v.get("connections").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0);
+            upload_speed = v.get("uploadSpeed").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0);
+        }
+    }
+
+    Ok(DownloadDetail {
+        id,
+        gid,
+        url,
+        file_name,
+        platform,
+        total_size,
+        downloaded_size,
+        speed,
+        status,
+        error_msg,
+        save_path,
+        create_time,
+        connections,
+        upload_speed,
+        total_time,
+    })
 }
 
 /// 设置变更后同步 aria2（限速 / 并发 / 目录）

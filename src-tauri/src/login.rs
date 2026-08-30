@@ -2,6 +2,10 @@
 //! 夸克 / UC / 百度 / 139：网页登录 → cookies_for_url 轮询 → 平台 API 验证 → 存库关窗。
 //! 迅雷：密码登录（可能触发短信）→ 短信登录 → signin/token 换 access_token。
 //! 123：账号密码 → JWT。
+//!
+//! 重要：每个平台的登录窗口使用独立的 WebView2 数据目录（data_dir/webview-login/<平台>），
+//! 每次打开登录窗前会清空该目录。这样每次登录都从干净 Cookie 出发，避免「退出登录后旧账号
+//! 会话残留 → 重新登录又自动回登」的问题（Quark/UC/百度/139 共用此机制）。
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::api::{baidu, c139, pan123, quark, uc, xunlei};
@@ -206,12 +210,17 @@ pub fn web_login_start(app: &AppHandle, platform: Platform) -> AppResult<()> {
     };
     let url = reqwest::Url::parse(config.login_url)
         .map_err(|_| AppError::Api("登录地址无效".into()))?;
+    // 每次登录用干净数据目录（清空旧 Cookie，杜绝旧账号自动回登）
+    clear_login_profile(app, platform);
     login_log(&format!("打开登录窗口 {} → {url}", config.label));
     let nav_logger = login_log.clone();
+    let profile_dir = login_profile_dir(app, platform);
     let window = tauri::WebviewWindowBuilder::new(app, &config.label, tauri::WebviewUrl::External(url))
         .title(config.title)
         .inner_size(980.0, 700.0)
         .center()
+        // 独立 WebView2 数据目录：登录 Cookie 与主窗口隔离，且每会话干净
+        .data_directory(profile_dir)
         // 桌面 Chrome UA（部分平台对非浏览器 UA 返回空白页）
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
         .on_navigation(move |nav| {
@@ -262,6 +271,31 @@ pub fn web_login_cancel(app: &AppHandle, platform: Platform) -> AppResult<()> {
         let _ = window.close();
     }
     Ok(())
+}
+
+/// 登录专用 WebView2 数据目录（每个平台独立，隔离登录 Cookie 以免跨会话串扰）
+fn login_profile_dir(app: &AppHandle, platform: Platform) -> std::path::PathBuf {
+    app.state::<AppState>().data_dir.join("webview-login").join(platform.key())
+}
+
+/// 清空平台登录数据目录（登出时调用，确保下次登录从干净 Cookie 出发）
+pub fn clear_login_profile(app: &AppHandle, platform: Platform) {
+    let dir = login_profile_dir(app, platform);
+    // best-effort：失败静默忽略，不阻塞登出主流程
+    let _ = std::fs::remove_dir_all(&dir);
+    state_log(app, &format!("clear_login_profile: 已清空登录数据目录 {}", dir.display()));
+}
+
+fn state_log(app: &AppHandle, msg: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.data_dir.join("login.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{} {}", chrono::Local::now().format("%m-%d %H:%M:%S"), msg);
+    }
 }
 
 // ---------- 迅雷表单登录 ----------

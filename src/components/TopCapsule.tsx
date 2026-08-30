@@ -6,10 +6,13 @@ interface TopCapsuleProps {
   onSelect: (tab: TabId) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  /** 隐藏的 Tab（如搜索 Tab 默认隐藏，设置开启后显示） */
+  hiddenTabs?: TabId[];
 }
 
-/** 顶部居中悬浮胶囊：品牌字 + 4 Tab 胶囊导航 + 主题切换（取代原左侧 SideNav） */
-export default function TopCapsule({ current, onSelect, theme, onToggleTheme }: TopCapsuleProps) {
+/** 顶部居中悬浮胶囊：品牌字 + Tab 胶囊导航 + 主题切换（取代原左侧 SideNav） */
+export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hiddenTabs }: TopCapsuleProps) {
+  const visible = TABS.filter((t) => !hiddenTabs?.includes(t.id));
   return (
     <nav
       aria-label="主导航"
@@ -27,7 +30,7 @@ export default function TopCapsule({ current, onSelect, theme, onToggleTheme }: 
       </div>
 
       {/* 导航 pills */}
-      {TABS.map((tab) => {
+      {visible.map((tab) => {
         const Icon = tab.icon;
         const active = current === tab.id;
         return (

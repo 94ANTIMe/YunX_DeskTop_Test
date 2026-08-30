@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronDown, Info, Loader2, RefreshCw, Trash2, XCircle } 
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, type LogRow } from "../lib/ipc";
 import { formatDate, platformLabel } from "../lib/format";
+import logsHero from "../assets/art/logs-hero.jpg";
 
 type LevelFilter = "" | "success" | "error" | "info";
 
@@ -104,8 +105,25 @@ export default function LogsPage() {
         <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</div>
       )}
 
+      {/* hero 插画带 */}
+      <section className="flex animate-rise items-center gap-8 rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
+        <div>
+          <p className="font-mono text-[10px] tracking-[0.25em] text-ink-soft">ACTIVITY LOG</p>
+          <h3 className="mt-1.5 font-display text-2xl font-semibold text-ink">操作日志</h3>
+          <p className="mt-2 max-w-md text-sm text-ink-soft">
+            解析、取链、下载、登录的每一步都会在这里留下记录；点按条目可展开细节。
+          </p>
+        </div>
+        <img
+          src={logsHero}
+          alt=""
+          draggable={false}
+          className="hidden h-36 w-56 shrink-0 rounded-card object-cover sm:block"
+        />
+      </section>
+
       {/* 筛选 */}
-      <section className="animate-rise rounded-card bg-carrier p-4" style={{ animationDelay: "60ms" }}>
+      <section className="animate-rise rounded-card bg-carrier p-4" style={{ animationDelay: "120ms" }}>
         <div className="flex gap-1.5">
           {FILTERS.map((f) => (
             <button

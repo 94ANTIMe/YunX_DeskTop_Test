@@ -2,7 +2,7 @@ use tauri::AppHandle;
 
 use crate::aria2;
 use crate::error::AppResult;
-use crate::models::DownloadTaskView;
+use crate::models::{DownloadDetail, DownloadTaskView};
 
 /// 入队下载任务（直链 + 请求头 → aria2）
 #[tauri::command]
@@ -24,6 +24,24 @@ pub async fn enqueue_download(
         false,
     )
     .await
+}
+
+/// 暂停全部（托盘菜单 / 前端）
+#[tauri::command]
+pub async fn pause_all_downloads(app: AppHandle) -> AppResult<()> {
+    aria2::pause_all(&app).await
+}
+
+/// 继续全部（托盘菜单 / 前端）
+#[tauri::command]
+pub async fn resume_all_downloads(app: AppHandle) -> AppResult<()> {
+    aria2::resume_all(&app).await
+}
+
+/// 单个任务 Dashboard 详情
+#[tauri::command]
+pub async fn download_detail(app: AppHandle, id: i64) -> AppResult<DownloadDetail> {
+    aria2::detail(&app, id).await
 }
 
 /// 暂停下载

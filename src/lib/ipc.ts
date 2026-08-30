@@ -19,6 +19,12 @@ export interface Settings {
   downloadConnPerServer: number;
   pansouBaseUrl: string;
   darkMode: number;
+  autoCheckUpdate: boolean;
+  clipboardMonitor: boolean;
+  minimizeToTray: boolean;
+  downloadNotify: boolean;
+  autoLaunch: boolean;
+  showSearchTab: boolean;
 }
 
 /** 设置默认值（与 Rust Settings::default 对齐；IPC 不可用时兜底） */
@@ -32,6 +38,12 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadConnPerServer: 16,
   pansouBaseUrl: "",
   darkMode: 0,
+  autoCheckUpdate: true,
+  clipboardMonitor: false,
+  minimizeToTray: true,
+  downloadNotify: true,
+  autoLaunch: false,
+  showSearchTab: false,
 };
 
 /** PanSou 搜索结果条目（与 Rust SearchItem 对齐） */
@@ -102,6 +114,25 @@ export interface DownloadTask {
   createTime: number;
 }
 
+/** 下载任务 Dashboard 详情（对齐 Rust DownloadDetail） */
+export interface DownloadDetail {
+  id: number;
+  gid: string;
+  url: string;
+  fileName: string;
+  platform: string;
+  totalSize: number;
+  downloadedSize: number;
+  speed: number;
+  status: number;
+  errorMsg: string;
+  savePath: string;
+  createTime: number;
+  connections: number;
+  uploadSpeed: number;
+  totalTime: number;
+}
+
 export interface Bookmark {
   id: number;
   link: string;
@@ -143,6 +174,30 @@ export interface LogRow {
 export interface LoginSuccessEvent {
   platform: string;
   nickname: string;
+}
+
+/** 剪贴板命中分享链接事件（对齐 Rust clipboard 模块发射） */
+export interface ClipboardShareEvent {
+  text: string;
+  parsed: { platform: string; shareId: string; pwd: string };
+  at: number;
+}
+
+/** 在线更新检查结果（对齐 Rust UpdateInfo） */
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  name: string;
+  notes: string;
+  downloadUrl: string;
+  browserDownloadUrl: string;
+}
+
+/** 安装包下载进度（`update:progress` 事件） */
+export interface UpdateProgress {
+  received: number;
+  total: number;
 }
 
 // ---------- 错误规范 ----------
@@ -192,10 +247,13 @@ export const ipc = {
     invoke<number>("enqueue_download", { url, fileName, headers, platform, cleanupId }),
   pauseDownload: (id: number) => invoke<void>("pause_download", { id }),
   resumeDownload: (id: number) => invoke<void>("resume_download", { id }),
+  pauseAllDownloads: () => invoke<void>("pause_all_downloads"),
+  resumeAllDownloads: () => invoke<void>("resume_all_downloads"),
   removeDownloadTask: (id: number, deleteLocal: boolean) =>
     invoke<void>("remove_download_task", { id, deleteLocal }),
   listDownloadTasks: () => invoke<DownloadTask[]>("list_download_tasks"),
   clearDownloadTasks: () => invoke<void>("clear_download_tasks"),
+  getDownloadDetail: (id: number) => invoke<DownloadDetail>("download_detail", { id }),
 
   listBookmarks: () => invoke<Bookmark[]>("list_bookmarks"),
   addBookmark: (link: string, title: string, pwd: string) =>
@@ -209,6 +267,10 @@ export const ipc = {
   listLogs: (level?: string, limit?: number) =>
     invoke<LogRow[]>("list_logs", { level, limit }),
   clearLogs: () => invoke<void>("clear_logs"),
+
+  checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  downloadUpdate: () => invoke<string>("download_update"),
+  installUpdate: (path: string) => invoke<void>("install_update", { path }),
 };
 
 // ---------- 事件订阅 ----------
@@ -219,4 +281,14 @@ export function onDownloadsUpdated(handler: (tasks: DownloadTask[]) => void): Pr
 
 export function onLoginSuccess(handler: (e: LoginSuccessEvent) => void): Promise<UnlistenFn> {
   return listen<LoginSuccessEvent>("login:success", (e) => handler(e.payload));
+}
+
+export function onUpdateProgress(handler: (p: UpdateProgress) => void): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("update:progress", (e) => handler(e.payload));
+}
+
+export function onClipboardShare(
+  handler: (e: ClipboardShareEvent) => void
+): Promise<UnlistenFn> {
+  return listen<ClipboardShareEvent>("clipboard:share-detected", (e) => handler(e.payload));
 }
