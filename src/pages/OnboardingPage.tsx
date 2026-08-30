@@ -13,8 +13,8 @@ import {
 import { errMsg, ipc, type Settings } from "../lib/ipc";
 import aboutHero from "../assets/art/about-lighthouse.jpg";
 
-/** 公共演示站（PanSou 官方 demo，可能不稳定；仅供快速体验） */
-const PUBLIC_PANSOU = "https://pansou.5201314.xyz";
+/** 公共实例预设（PanSou 官方在线体验站，实测可用；可能不稳定 / 政策收紧后失效） */
+const PUBLIC_PANSOU = "https://so.252035.xyz";
 
 interface OnboardingPageProps {
   settings: Settings;

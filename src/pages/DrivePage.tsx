@@ -112,7 +112,7 @@ export default function DrivePage() {
       )}
 
       {/* hero 插画带 */}
-      <section className="flex animate-rise items-center gap-8 rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
+      <section className="flex animate-rise items-center justify-between gap-8 rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
         <div>
           <p className="font-mono text-[10px] tracking-[0.25em] text-ink-soft">SIX DRIVES</p>
           <h3 className="mt-1.5 font-display text-2xl font-semibold text-ink">网盘账号中心</h3>
@@ -131,7 +131,7 @@ export default function DrivePage() {
           return (
             <section
               key={p.id}
-              className="animate-rise rounded-card bg-carrier p-5"
+              className={`animate-rise relative rounded-card bg-carrier p-5 ${openMenu === p.id ? "z-30" : ""}`}
               style={{ animationDelay: `${120 + i * 50}ms` }}
             >
               <div className="flex items-start justify-between">

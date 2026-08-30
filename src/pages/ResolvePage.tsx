@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -7,6 +7,7 @@ import {
   ChevronRight,
   FileText,
   FolderOpen,
+  FolderTree,
   History,
   Link2,
   Loader2,
@@ -30,6 +31,31 @@ interface DirStackEntry {
   name: string;
 }
 
+/** 目录树节点（懒加载：children 未定义=尚未展开；expanded 控制展开态） */
+interface TreeNode {
+  fid: string;
+  name: string;
+  isdir: boolean;
+  fsize: number;
+  expanded: boolean;
+  loading: boolean;
+  children?: TreeNode[];
+}
+
+/** ShareFile → 树节点 */
+function toTreeNode(f: ShareFile): TreeNode {
+  return { fid: f.fid, name: f.fname, isdir: f.isdir, fsize: f.fsize, expanded: false, loading: false, children: undefined };
+}
+
+/** 按 fid 不可变更新树（命中节点应用 patch，其余原样传递） */
+function updateTree(nodes: TreeNode[], fid: string, patch: Partial<TreeNode>): TreeNode[] {
+  return nodes.map((n) => {
+    if (n.fid === fid) return { ...n, ...patch };
+    if (n.children) return { ...n, children: updateTree(n.children, fid, patch) };
+    return n;
+  });
+}
+
 /** 解析页：粘贴链接 → 建会话 → 文件树导航 → 取链入队下载 + 收藏 */
 export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: ResolvePageProps) {
   const [input, setInput] = useState("");
@@ -51,6 +77,9 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [bookmarks, setBookmarks] = useState<BookmarkRow[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<ResolveHistory[]>([]);
+  /** 目录树：是否展示侧栏树 + 根节点 */
+  const [showTree, setShowTree] = useState(false);
+  const [treeRoot, setTreeRoot] = useState<TreeNode | null>(null);
   const noticeTimer = useRef<number | undefined>(undefined);
 
   const showNotice = (msg: string) => {
@@ -71,6 +100,16 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setFiles(info.files);
       setHasMore(info.hasMore);
       setDirStack([{ fid: "0", name: info.title || "根目录" }]);
+      // 初始化目录树根节点（懒加载子目录）
+      setTreeRoot({
+        fid: "0",
+        name: info.title || "根目录",
+        isdir: true,
+        fsize: 0,
+        expanded: true,
+        loading: false,
+        children: info.files.map(toTreeNode),
+      });
       setPage(1);
       if (info.title) showNotice(`已解析：${info.title}`);
       ipc.listResolveHistory().then(setHistory).catch(() => {});
@@ -149,6 +188,89 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     } finally {
       setLoadingDir(false);
     }
+  }
+
+  // 目录树：文件夹展开/跳转（点击目录即在主列表导航进入）
+  async function jumpTree(node: TreeNode) {
+    if (!session || node.loading) return;
+    // 已展开 → 折叠；未展开 → 懒加载子目录
+    if (node.expanded && node.children) {
+      setTreeRoot((r) => (r ? { ...r, children: updateTree(r.children ?? [], node.fid, { expanded: false }) } : r));
+      return;
+    }
+    setTreeRoot((r) =>
+      r ? { ...r, children: updateTree(r.children ?? [], node.fid, { loading: true }) } : r
+    );
+    try {
+      const res = await ipc.listShareFiles(session.sessionKey, node.fid, 1);
+      setTreeRoot((r) =>
+        r
+          ? {
+              ...r,
+              children: updateTree(r.children ?? [], node.fid, {
+                expanded: true,
+                loading: false,
+                children: res.files.map(toTreeNode),
+              }),
+            }
+          : r
+      );
+    } catch (e) {
+      setError(errMsg(e));
+      setTreeRoot((r) => (r ? { ...r, children: updateTree(r.children ?? [], node.fid, { loading: false }) } : r));
+      return;
+    }
+    // 同步主文件列表导航到该目录
+    setLoadingDir(true);
+    try {
+      const result = await ipc.listShareFiles(session.sessionKey, node.fid, 1);
+      setFiles(result.files);
+      setHasMore(result.hasMore);
+      setDirStack((s) => [...s, { fid: node.fid, name: node.name }]);
+      setPage(1);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setLoadingDir(false);
+    }
+  }
+
+  // 递归渲染目录树节点
+  function renderTree(node: TreeNode, depth = 0): ReactNode {
+    const indent = depth * 14;
+    return (
+      <li key={node.fid} className="py-0.5">
+        <button
+          onClick={() => node.isdir && jumpTree(node)}
+          className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left transition-colors hover:bg-carrier-deep"
+          style={{ paddingLeft: 8 + indent }}
+          title={node.isdir ? "展开 / 进入" : node.name}
+        >
+          {node.isdir ? (
+            node.loading ? (
+              <Loader2 size={12} className="shrink-0 animate-spin text-clay" />
+            ) : (
+              <ChevronRight
+                size={12}
+                className={`shrink-0 text-ink-soft transition-transform ${node.expanded ? "rotate-90" : ""}`}
+              />
+            )
+          ) : (
+            <span className="w-3 shrink-0" />
+          )}
+          {node.isdir ? (
+            <FolderOpen size={14} className="shrink-0 text-clay" />
+          ) : (
+            <FileText size={14} className="shrink-0 text-ink-soft" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-xs text-ink">{node.name}</span>
+          {!node.isdir && (
+            <span className="shrink-0 font-mono text-[10px] text-ink-soft/70">{formatBytes(node.fsize)}</span>
+          )}
+        </button>
+        {node.expanded && node.children && <ul>{node.children.map((c) => renderTree(c, depth + 1))}</ul>}
+      </li>
+    );
   }
 
   // 单文件下载：取链 → 入队
@@ -387,6 +509,17 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       {/* 解析结果：面包屑 + 文件列表 */}
       {session && (
         <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "120ms" }}>
+          <div className="flex gap-5">
+            {/* 目录树侧栏（懒加载） */}
+            {showTree && treeRoot && (
+              <aside className="w-64 shrink-0 rounded-ctrl border border-ink/10 bg-carrier-deep/40 p-2">
+                <p className="mb-1 px-2 font-mono text-[10px] tracking-[0.25em] text-ink-soft">
+                  DIRECTORY TREE
+                </p>
+                <ul className="max-h-[50vh] overflow-y-auto pr-0.5">{renderTree(treeRoot)}</ul>
+              </aside>
+            )}
+            <div className="min-w-0 flex-1">
           {/* 面包屑 */}
           <div className="flex flex-wrap items-center gap-1 border-b border-ink/10 pb-4">
             <span className="rounded-full bg-clay px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-widest text-white">
@@ -417,6 +550,18 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
               </button>
             )}
             {loadingDir && <Loader2 size={14} className="animate-spin text-clay" />}
+            <button
+              onClick={() => setShowTree((v) => !v)}
+              className={`ml-auto flex shrink-0 items-center gap-1.5 rounded-ctrl border px-3 py-1.5 text-xs font-medium transition-colors ${
+                showTree
+                  ? "border-clay text-clay-deep"
+                  : "border-ink/15 text-ink-soft hover:border-clay hover:text-clay-deep"
+              }`}
+              title={showTree ? "隐藏目录树" : "显示目录树"}
+            >
+              <FolderTree size={13} />
+              目录树
+            </button>
           </div>
 
           {/* 文件列表 */}
@@ -476,6 +621,8 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
               {loadingDir ? "加载中…" : "加载更多"}
             </button>
           )}
+            </div>
+          </div>
         </section>
       )}
 

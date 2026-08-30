@@ -1,4 +1,4 @@
-name: 构建并发布 v0.3
+name: 构建并发布 v0.4
 
 # 触发：推送 v* 标签（git push --tags），或手动运行
 on:
@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "发布版本号（如 v0.4.0）"
+        description: "发布版本号（如 v0.4.1）"
         required: false
-        default: "v0.4.0"
+        default: "v0.4.1"
 
 env:
   GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY || 'ANTIMelody/YunX_DeskTop_Test' }}
