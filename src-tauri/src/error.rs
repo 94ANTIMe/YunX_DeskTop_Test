@@ -13,6 +13,8 @@ pub enum AppError {
     Lock,
     #[error("{0}")]
     Api(String),
+    #[error("凭据安全错误: {0}")]
+    Crypto(String),
     #[error("功能未实现: {0}")]
     Unsupported(String),
 }
@@ -26,6 +28,7 @@ impl Serialize for AppError {
             AppError::Network(_) => "network",
             AppError::Lock => "lock",
             AppError::Api(_) => "api",
+            AppError::Crypto(_) => "crypto",
             AppError::Unsupported(_) => "unsupported",
         };
         let mut s = serializer.serialize_struct("AppError", 2)?;

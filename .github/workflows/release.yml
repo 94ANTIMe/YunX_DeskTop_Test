@@ -1,0 +1,176 @@
+name: 构建并发布 v0.3
+
+# 触发：推送 v* 标签（git push --tags），或手动运行
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号（如 v0.4.0）"
+        required: false
+        default: "v0.4.0"
+
+env:
+  GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY || 'ANTIMelody/YunX_DeskTop_Test' }}
+
+jobs:
+  # ---------- 构建（Windows，含代码签名）----------
+  build:
+    name: 构建 x64（NSIS + MSI）
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 Rust（稳定版）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 启用 Rust 缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: 启用 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # ---------- 代码签名（可选）：配置了 WINDOWS_CERTIFICATE 才执行 ----------
+      - name: 导入签名证书到用户证书库
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "code-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String(${{ secrets.WINDOWS_CERTIFICATE }}))
+          $cert = Get-PfxCertificate -FilePath $pfx
+          $thumb = $cert.Thumbprint
+          echo "THUMBPRINT=$thumb" >> $env:GITHUB_ENV
+          CertUtil -user -importPFX $pfx proPwd:${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }} > $null
+          Write-Host "证书已导入: $thumb"
+
+      - name: 注入签名配置（存在证书时）
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          $confPath = "src-tauri/tauri.conf.json"
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          if ($null -eq $conf.bundle.windows) { $conf.bundle.windows = @{} }
+          $conf.bundle.windows.certificateThumbprint = $env:THUMBPRINT
+          $conf.bundle.windows.digestAlgorithm = "sha256"
+          $conf.bundle.windows.timestampUrl = "http://timestamp.digicert.com"
+          $conf | ConvertTo-Json -Depth 20 | Set-Content $confPath -Encoding UTF8
+          Write-Host "已注入代码签名配置"
+
+      - name: 构建安装包（Tauri）
+        run: pnpm tauri build --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 列出产物
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse src-tauri/target/release/bundle -Include *.exe,*.msi | ForEach-Object { Write-Host "ARTIFACT: $($_.FullName) ($($_.Length) bytes)" }
+
+      - name: 上传产物（暂存）
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+  # ---------- 发布（GitHub + GitCode 双源）----------
+  publish:
+    name: 发布到 GitHub / GitCode
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist
+
+      - name: 生成发布说明（取提交信息）
+        id: notes
+        shell: bash
+        run: |
+          echo "::group::Release notes"
+          git log --oneline -1
+          echo "---" > notes.md
+          git log -1 --format='%s' >> notes.md
+          echo "" >> notes.md
+          cat notes.md
+          echo "::endgroup::"
+
+      # ---------- GitHub Release ----------
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.TAG_NAME }}
+          body_path: notes.md
+          files: |
+            dist/*.exe
+            dist/*.msi
+          draft: false
+          prerelease: false
+
+      # ---------- GitCode Release（OpenAPI v5）----------
+      - name: 发布 GitCode Release
+        if: ${{ secrets.GITCODE_TOKEN != '' }}
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ env.GITCODE_REPOSITORY }}"
+          TAG="${{ env.TAG_NAME }}"
+
+          # 1. 检查是否已存在同名 Release
+          CHECK=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" \
+            "https://api.gitcode.com/api/v5/repos/${REPO}/releases/tags/${TAG}")
+
+          if [ "$CHECK" = "404" ]; then
+            echo "创建 GitCode Release ${TAG} ..."
+            BODY=$(jq -Rn '{tag_name:$t, name:$n, body:$b, prerelease:false}' \
+              --arg t "$TAG" --arg n "$TAG" --arg b "$(sed ':a;N;$!ba;s/\n/\\n/g' notes.md)")
+            curl -fsS -X POST \
+              -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" -H "Content-Type: application/json" \
+              "https://api.gitcode.com/api/v5/repos/${REPO}/releases" \
+              -d "$BODY" > /dev/null && echo "GitCode Release 已创建"
+          else
+            echo "GitCode Release ${TAG} 已存在，跳过创建"
+          fi
+
+          # 2. 上传每个资产：get upload_url → PUT
+          for FILE in dist/*.exe dist/*.msi; do
+            [ -f "$FILE" ] || continue
+            NAME=$(basename "$FILE")
+            echo "上传 $NAME ..."
+            UPLOAD_INFO=$(curl -fsS \
+              -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" \
+              "https://api.gitcode.com/api/v5/repos/${REPO}/releases/${TAG}/upload_url?file_name=${NAME}")
+            UPLOAD_URL=$(echo "$UPLOAD_INFO" | jq -r '.url')
+            HDRS=$(echo "$UPLOAD_INFO" | jq -r '.headers | to_entries | map("-H " + ("\"" + .key + ": " + .value + "\"")) | join(" ")')
+            eval "curl -fsS -o /dev/null -X PUT $HDRS --data-binary @\"$FILE\" \"$UPLOAD_URL\""
+            echo "  → $NAME 上传完成"
+          done

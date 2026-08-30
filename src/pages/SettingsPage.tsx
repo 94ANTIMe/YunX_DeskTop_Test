@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Loader2, Minimize2, Power, RefreshCw, Search } from "lucide-react";
+import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, Loader2, Minimize2, Power, RefreshCw, Search, ShieldCheck, Wifi } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
 import { useUpdate } from "../hooks/useUpdate";
@@ -106,6 +106,8 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyResult, setProxyResult] = useState<{ ok: boolean; ip?: string; latencyMs?: number; error?: string } | null>(null);
   const updater = useUpdate();
 
   // 初始加载（失败回退默认值，避免区块整体不渲染）
@@ -398,6 +400,138 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
               </div>
             )}
           </dl>
+        </section>
+      )}
+
+      {/* 代理（aria2 下载透明走代理） */}
+      {s && (
+        <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "135ms" }}>
+          <div className="flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <Globe size={15} className="text-clay" strokeWidth={1.8} />
+              代理（下载 / PanSou / 测速）
+            </h3>
+            {saving && <Loader2 size={14} className="animate-spin text-clay" />}
+          </div>
+
+          {/* 开关 + 类型 */}
+          <div className="mt-2 divide-y divide-ink/10">
+            <ToggleRow
+              icon={ShieldCheck}
+              title="启用全局代理"
+              desc="开启后下载引擎、搜索服务与更新下载均走代理；重启引擎后完全生效"
+              checked={s.proxyEnabled}
+              onChange={(v) => persist({ ...s, proxyEnabled: v })}
+            />
+            {s.proxyEnabled && (
+              <div className="space-y-3 pt-3">
+                {/* 类型 + 地址 + 端口 */}
+                <div className="flex items-center gap-2">
+                  <select
+                    value={s.proxyType}
+                    onChange={(e) => persist({ ...s, proxyType: e.currentTarget.value })}
+                    className="h-9 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 font-mono text-xs text-ink focus:border-clay focus:outline-none"
+                  >
+                    <option value="http">HTTP</option>
+                    <option value="socks5">SOCKS5</option>
+                  </select>
+                  <input
+                    type="text"
+                    defaultValue={s.proxyHost}
+                    key={`host-${s.proxyHost}`}
+                    placeholder="127.0.0.1"
+                    spellCheck={false}
+                    onBlur={(e) => {
+                      if (e.currentTarget.value.trim() !== s.proxyHost) persist({ ...s, proxyHost: e.currentTarget.value.trim() });
+                    }}
+                    className="h-9 min-w-0 flex-1 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    defaultValue={s.proxyPort || ""}
+                    key={`port-${s.proxyPort}`}
+                    placeholder="端口"
+                    min={1}
+                    max={65535}
+                    onBlur={(e) => {
+                      const n = Math.max(1, Math.min(65535, Number(e.currentTarget.value) || 0));
+                      if (n !== s.proxyPort) persist({ ...s, proxyPort: n });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    }}
+                    className="h-9 w-24 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                </div>
+                {/* 认证（可选） */}
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    defaultValue={s.proxyUsername}
+                    key={`user-${s.proxyUsername}`}
+                    placeholder="用户名（可选）"
+                    spellCheck={false}
+                    onBlur={(e) => {
+                      if (e.currentTarget.value !== s.proxyUsername) persist({ ...s, proxyUsername: e.currentTarget.value });
+                    }}
+                    className="h-9 min-w-0 flex-1 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                  <input
+                    type="password"
+                    defaultValue={s.proxyPassword}
+                    key={`pw-${s.proxyPassword}`}
+                    placeholder="密码（可选，DPAPI 加密存储）"
+                    onBlur={(e) => {
+                      if (e.currentTarget.value !== s.proxyPassword) persist({ ...s, proxyPassword: e.currentTarget.value });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    }}
+                    className="h-9 min-w-0 flex-1 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                </div>
+                {/* 测试代理 */}
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={async () => {
+                      setProxyTesting(true);
+                      setProxyResult(null);
+                      setError("");
+                      try {
+                        setProxyResult(await ipc.testProxy());
+                      } catch (e) {
+                        setError(errMsg(e));
+                      } finally {
+                        setProxyTesting(false);
+                      }
+                    }}
+                    disabled={proxyTesting || !s.proxyHost || !s.proxyPort}
+                    className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-white transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
+                  >
+                    {proxyTesting ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+                    测试代理
+                  </button>
+                  {proxyResult && (
+                    <span
+                      className={
+                        proxyResult.ok
+                          ? `truncate text-xs text-cactus`
+                          : "truncate text-xs text-clay-deep"
+                      }
+                      title={proxyResult.error}
+                    >
+                      {proxyResult.ok
+                        ? `出口 IP ${proxyResult.ip} · ${proxyResult.latencyMs}ms`
+                        : `连接失败：${proxyResult.error}`}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-ink-soft/70">
+                  代理地址变更即时写入下载引擎；若为限制式代理建议同时开启「重新启动引擎」使 aria2 全量走代理。
+                </p>
+              </div>
+            )}
+          </div>
         </section>
       )}
 

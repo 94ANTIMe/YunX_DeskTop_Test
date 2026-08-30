@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import TopCapsule from "./components/TopCapsule";
 import ClipboardPrompt from "./components/ClipboardPrompt";
 import UpdateBanner from "./components/UpdateBanner";
+import OnboardingPage from "./pages/OnboardingPage";
 import ResolvePage from "./pages/ResolvePage";
 import DrivePage from "./pages/DrivePage";
 import SearchPage from "./pages/SearchPage";
@@ -10,7 +11,7 @@ import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useTheme } from "./hooks/useTheme";
 import { useUpdate } from "./hooks/useUpdate";
-import { ipc, onClipboardShare, onSettingsUpdated, type ClipboardShareEvent } from "./lib/ipc";
+import { ipc, onClipboardShare, onSettingsUpdated, type ClipboardShareEvent, type Settings } from "./lib/ipc";
 import type { TabId } from "./lib/tabs";
 
 /** 应用壳：顶部居中悬浮胶囊 + 内容区。
@@ -18,6 +19,9 @@ import type { TabId } from "./lib/tabs";
 export default function App() {
   const [tab, setTab] = useState<TabId>("resolve");
   const { mode, effective, setMode, toggle } = useTheme();
+  // 首次启动引导（onboarded=false 时全屏展示；完成后进入主界面）
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
   // 设置（只读关键开关：剪贴板监听、搜索 Tab 显隐）
   const [showSearchTab, setShowSearchTab] = useState(false);
   const [clipboardOn, setClipboardOn] = useState(false);
@@ -36,6 +40,8 @@ export default function App() {
       .getSettings()
       .then((s) => {
         if (!alive) return;
+        setSettings(s);
+        setOnboarded(Boolean(s.onboarded));
         setClipboardOn(s.clipboardMonitor);
         setShowSearchTab(s.showSearchTab);
         if (s.autoCheckUpdate) updater.check();
@@ -66,6 +72,8 @@ export default function App() {
   // 设置保存后即时生效（搜索胶囊显隐、剪贴板监听开关）
   useEffect(() => {
     const un = onSettingsUpdated((s) => {
+      setSettings(s);
+      setOnboarded(Boolean(s.onboarded));
       setShowSearchTab(s.showSearchTab);
       setClipboardOn(s.clipboardMonitor);
     });
@@ -93,6 +101,18 @@ export default function App() {
   }
 
   const showUpdateBanner = !updateDismissed && !!updater.info?.hasUpdate;
+
+  // 首启引导（设置尚未读取 = null 时渲染空白等待；避免闪烁主界面）
+  if (onboarded === null) return <div className="h-full bg-ivory" />;
+  if (onboarded === false) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden bg-ivory text-ink">
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          {settings && <OnboardingPage settings={settings} onDone={() => setOnboarded(true)} />}
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-ivory text-ink">

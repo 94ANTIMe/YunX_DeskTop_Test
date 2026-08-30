@@ -25,6 +25,17 @@ export interface Settings {
   downloadNotify: boolean;
   autoLaunch: boolean;
   showSearchTab: boolean;
+  /** 代理开关（aria2 全局限速走 --all-proxy） */
+  proxyEnabled: boolean;
+  proxyType: string;
+  proxyHost: string;
+  proxyPort: number;
+  proxyUsername: string;
+  proxyPassword: string;
+  /** 平台当前选中账号（platform → 账号 key） */
+  activeAccountKeys: Record<string, string>;
+  /** 首启引导已完成 */
+  onboarded: boolean;
 }
 
 /** 设置默认值（与 Rust Settings::default 对齐；IPC 不可用时兜底） */
@@ -44,6 +55,14 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadNotify: true,
   autoLaunch: false,
   showSearchTab: false,
+  proxyEnabled: false,
+  proxyType: "http",
+  proxyHost: "",
+  proxyPort: 0,
+  proxyUsername: "",
+  proxyPassword: "",
+  activeAccountKeys: {},
+  onboarded: false,
 };
 
 /** PanSou 搜索结果条目（与 Rust SearchItem 对齐） */
@@ -59,6 +78,30 @@ export interface AccountSummary {
   platform: string;
   nickname: string | null;
   loggedIn: boolean;
+}
+
+/** 平台账号行（多账号切换列表；active = 当前选中） */
+export interface AccountRow {
+  platform: string;
+  key: string;
+  nickname: string;
+  updatedAt: number;
+  active: boolean;
+}
+
+/** 代理连通性测试结果（设置页「测试代理」展示） */
+export interface ProxyTestResult {
+  ok: boolean;
+  ip: string;
+  latencyMs: number;
+  error: string;
+}
+
+/** PanSou 连通性检测结果（首启引导 / 设置页） */
+export interface PansouPingResult {
+  ok: boolean;
+  latencyMs: number;
+  error: string;
 }
 
 export interface ParsedShare {
@@ -235,7 +278,16 @@ export const ipc = {
   updateSettings: (settings: Settings) => invoke<void>("update_settings", { settings }),
 
   listAccounts: () => invoke<AccountSummary[]>("list_accounts"),
-  logout: (platform: string) => invoke<void>("logout", { platform }),
+  /** 平台账号列表（多账号切换下拉） */
+  listAccountRows: (platform: string) => invoke<AccountRow[]>("list_account_rows", { platform }),
+  /** 切换平台当前选中账号 */
+  switchAccount: (platform: string, key: string) =>
+    invoke<void>("switch_account", { platform, key }),
+  logout: (platform: string, key?: string) => invoke<void>("logout", { platform, key }),
+  /** 代理连通性测试（真实出口 IP 探测） */
+  testProxy: () => invoke<ProxyTestResult>("test_proxy"),
+  /** PanSou 服务连通性检测 */
+  pansouPing: (baseUrl: string) => invoke<PansouPingResult>("pansou_ping", { baseUrl }),
   webLoginStart: (platform: string) => invoke<void>("web_login_start", { platform }),
   webLoginCancel: (platform: string) => invoke<void>("web_login_cancel", { platform }),
   xunleiLogin: (username: string, password: string) =>

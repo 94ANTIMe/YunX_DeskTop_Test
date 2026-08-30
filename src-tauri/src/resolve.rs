@@ -66,7 +66,8 @@ const MAX_SESSIONS: usize = 32;
 
 fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-    match accounts::load(&conn, platform)? {
+    let active = state.active_account_key(&platform);
+    match accounts::load(&conn, platform, &active)? {
         Some(acc) if !acc.cookie().is_empty() => Ok(acc.cookie().to_string()),
         _ => Err(AppError::Api(need_login_msg.to_string())),
     }
@@ -105,10 +106,13 @@ fn persist_cookie(state: &AppState, platform: Platform, cookie: &str, nickname: 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let _ = accounts::save(
+    // 写入当前选中账号行（不要新建行，否则每次 __puus 刷新都产生一条新账号）
+    let key = state.active_account_key(&platform);
+    let _ = accounts::save_with_key(
         &conn,
         &Account::Cookie { platform, cookie: cookie.to_string(), nickname: nickname.to_string() },
         now,
+        &key,
     );
 }
 
@@ -487,7 +491,8 @@ pub async fn get_download_link(
         Platform::Pan123 => {
             let token = {
                 let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-                match accounts::load(&conn, platform)? {
+                let active = state.active_account_key(&platform);
+                match accounts::load(&conn, platform, &active)? {
                     Some(Account::Pan123 { access_token, .. }) if !access_token.is_empty() => access_token,
                     _ => return Err(AppError::Api("请先登录 123 云盘".into())),
                 }

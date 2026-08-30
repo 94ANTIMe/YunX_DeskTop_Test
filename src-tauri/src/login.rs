@@ -131,12 +131,14 @@ async fn validate_and_save(state: &AppState, platform: Platform, cookie: &str) -
             }
             let nickname = quark::fetch_nickname(&state.http, cookie).await.ok()?;
             let conn = state.db.lock().ok()?;
-            accounts::save(
+            let key = accounts::save(
                 &conn,
                 &Account::Cookie { platform, cookie: cookie.into(), nickname: nickname.clone() },
                 now,
             )
             .ok()?;
+            drop(conn);
+            state.set_active_account(&platform, &key);
             Some(nickname)
         }
         Platform::Uc => {
@@ -145,12 +147,14 @@ async fn validate_and_save(state: &AppState, platform: Platform, cookie: &str) -
             }
             let nickname = uc::fetch_nickname(&state.http, cookie).await.ok()?;
             let conn = state.db.lock().ok()?;
-            accounts::save(
+            let key = accounts::save(
                 &conn,
                 &Account::Cookie { platform, cookie: cookie.into(), nickname: nickname.clone() },
                 now,
             )
             .ok()?;
+            drop(conn);
+            state.set_active_account(&platform, &key);
             Some(nickname)
         }
         Platform::Baidu => {
@@ -159,12 +163,14 @@ async fn validate_and_save(state: &AppState, platform: Platform, cookie: &str) -
             }
             let nickname = baidu::fetch_nickname(&state.http, cookie).await.ok()?;
             let conn = state.db.lock().ok()?;
-            accounts::save(
+            let key = accounts::save(
                 &conn,
                 &Account::Cookie { platform, cookie: cookie.into(), nickname: nickname.clone() },
                 now,
             )
             .ok()?;
+            drop(conn);
+            state.set_active_account(&platform, &key);
             Some(nickname)
         }
         Platform::C139 => {
@@ -174,16 +180,46 @@ async fn validate_and_save(state: &AppState, platform: Platform, cookie: &str) -
             let nickname = c139::extract_nickname(cookie).unwrap_or_else(|| "139 用户".into());
             let authorization = c139::extract_authorization(cookie).unwrap_or_default();
             let conn = state.db.lock().ok()?;
-            accounts::save(
+            let key = accounts::save(
                 &conn,
                 &Account::C139 { cookie: cookie.into(), authorization, nickname: nickname.clone() },
                 now,
             )
             .ok()?;
+            drop(conn);
+            state.set_active_account(&platform, &key);
             Some(nickname)
         }
         _ => None,
     }
+}
+
+/// 新账号登录保存：以独立新行入库（多账号），并写为当前选中账号；返回 key
+fn set_xunlei_new_account(state: &AppState, nickname: &str) -> Option<String> {
+    let rt = state.xunlei.lock().ok()?;
+    if rt.access_token.is_empty() {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let conn = state.db.lock().ok()?;
+    let key = accounts::save(
+        &conn,
+        &Account::Xunlei {
+            access_token: rt.access_token.clone(),
+            refresh_token: rt.refresh_token.clone(),
+            device_id: rt.fp.device_id.clone(),
+            captcha_token: rt.captcha_token.clone(),
+            nickname: nickname.to_string(),
+        },
+        now,
+    )
+    .ok()?;
+    drop(conn);
+    state.set_active_account(&Platform::Xunlei, &key);
+    Some(key)
 }
 
 /// 打开 WebView 登录窗口并启动 Cookie 轮询
@@ -322,7 +358,9 @@ pub async fn xunlei_login(
             return Err(e);
         }
         let nickname = if step.nickname.is_empty() { "迅雷用户".to_string() } else { step.nickname.clone() };
-        state.persist_xunlei_runtime(&nickname)?;
+        if set_xunlei_new_account(&state, &nickname).is_none() {
+            return Err(AppError::Api("账号保存失败".into()));
+        }
         let _ = app.emit("login:success", serde_json::json!({ "platform": "xunlei", "nickname": nickname }));
         return Ok(xunlei::LoginStep {
             need_sms: false,
@@ -378,7 +416,9 @@ pub async fn xunlei_sms_login(
     let _ = xunlei::exchange_token(&state.http, &mut rt, &step.session_id).await?;
     *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
     let nickname = if step.nickname.is_empty() { "迅雷用户".to_string() } else { step.nickname.clone() };
-    state.persist_xunlei_runtime(&nickname)?;
+    if set_xunlei_new_account(&state, &nickname).is_none() {
+        return Err(AppError::Api("账号保存失败".into()));
+    }
     let _ = app.emit("login:success", serde_json::json!({ "platform": "xunlei", "nickname": nickname }));
     Ok(xunlei::LoginStep {
         need_sms: false,
@@ -402,11 +442,13 @@ pub async fn pan123_login(app: &AppHandle, account: &str, password: &str) -> App
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    accounts::save(
+    let key = accounts::save(
         &conn,
         &Account::Pan123 { access_token: token, account: account.to_string(), nickname: nickname.clone() },
         now,
     )?;
+    drop(conn);
+    state.set_active_account(&Platform::Pan123, &key);
     let _ = app.emit("login:success", serde_json::json!({ "platform": "pan123", "nickname": nickname }));
     Ok(nickname)
 }

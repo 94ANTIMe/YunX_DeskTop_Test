@@ -31,3 +31,46 @@ pub async fn pansou_search(
     );
     Ok(result)
 }
+
+/// PanSou 连通性检测结果（首启引导 / 设置页）
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PansouPingResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub error: String,
+}
+
+/// 测试 PanSou 服务连通性（发起一次真实搜索请求）
+#[tauri::command]
+pub async fn pansou_ping(app: AppHandle, base_url: String) -> PansouPingResult {
+    let base = base_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return PansouPingResult { ok: false, latency_ms: 0, error: "服务地址为空".into() };
+    }
+    let start = std::time::Instant::now();
+    match crate::api::pansou::search(&base, "yunx", None).await {
+        Ok(items) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            app.state::<AppState>().log(
+                crate::logger::SUCCESS,
+                "pansou",
+                "ping",
+                &format!("PanSou 连通：{} 条结果", items.len()),
+                &format!("{base} · {latency_ms}ms"),
+            );
+            PansouPingResult { ok: true, latency_ms, error: String::new() }
+        }
+        Err(e) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            app.state::<AppState>().log(
+                crate::logger::ERROR,
+                "pansou",
+                "ping",
+                "PanSou 连通检测失败",
+                &e.to_string(),
+            );
+            PansouPingResult { ok: false, latency_ms, error: e.to_string() }
+        }
+    }
+}

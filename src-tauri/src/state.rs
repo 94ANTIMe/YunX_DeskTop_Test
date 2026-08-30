@@ -47,25 +47,52 @@ impl AppState {
         })
     }
 
-    /// 读取设置（settings.json；不存在返回默认值）
+    /// 读取设置（settings.json；不存在返回默认值；代理密码 DPAPI 解密）
     pub fn load_settings(&self) -> Settings {
-        std::fs::read_to_string(self.data_dir.join("settings.json"))
+        let mut settings: Settings = std::fs::read_to_string(self.data_dir.join("settings.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !settings.proxy_password.is_empty() {
+            settings.proxy_password =
+                crate::crypto::decrypt(&settings.proxy_password).ok().flatten().unwrap_or_default();
+        }
+        settings
     }
 
-    /// 保存设置
+    /// 保存设置（代理密码 DPAPI 加密后落盘）
     pub fn save_settings(&self, settings: &Settings) -> AppResult<()> {
-        let text = serde_json::to_string_pretty(settings)?;
+        let mut to_write = settings.clone();
+        if !to_write.proxy_password.is_empty() {
+            to_write.proxy_password = crate::crypto::encrypt(&to_write.proxy_password)?;
+        }
+        let text = serde_json::to_string_pretty(&to_write)?;
         std::fs::write(self.data_dir.join("settings.json"), text)?;
         Ok(())
+    }
+
+    /// 平台当前账号 key（无选中回退平台 key——兼容 v0.2 单行库）
+    pub fn active_account_key(&self, platform: &crate::models::Platform) -> String {
+        let settings = self.load_settings();
+        settings
+            .active_account_keys
+            .get(platform.key())
+            .cloned()
+            .unwrap_or_else(|| platform.key().to_string())
+    }
+
+    /// 写入平台当前账号 key
+    pub fn set_active_account(&self, platform: &crate::models::Platform, key: &str) {
+        let mut settings = self.load_settings();
+        settings.active_account_keys.insert(platform.key().to_string(), key.to_string());
+        let _ = self.save_settings(&settings);
     }
 
     /// 从 DB 加载迅雷 token 到运行时（调用任何 pan 接口前确保）
     pub fn load_xunlei_runtime(&self) -> AppResult<()> {
         let conn = self.db.lock().map_err(|_| crate::error::AppError::Lock)?;
-        let acc = crate::db::accounts::load(&conn, crate::models::Platform::Xunlei)?;
+        let active = self.active_account_key(&crate::models::Platform::Xunlei);
+        let acc = crate::db::accounts::load(&conn, crate::models::Platform::Xunlei, &active)?;
         let mut rt = self.xunlei.lock().map_err(|_| crate::error::AppError::Lock)?;
         if let Some(crate::db::accounts::Account::Xunlei {
             access_token,
@@ -93,7 +120,7 @@ impl AppState {
         Ok(())
     }
 
-    /// 把迅雷运行时 token 持久化回 DB
+    /// 把迅雷运行时 token 持久化回 DB（写入当前选中账号行）
     pub fn persist_xunlei_runtime(&self, nickname: &str) -> AppResult<()> {
         let rt = self.xunlei.lock().map_err(|_| crate::error::AppError::Lock)?;
         if rt.access_token.is_empty() {
@@ -104,7 +131,8 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        crate::db::accounts::save(
+        let key = self.active_account_key(&crate::models::Platform::Xunlei);
+        crate::db::accounts::save_with_key(
             &conn,
             &crate::db::accounts::Account::Xunlei {
                 access_token: rt.access_token.clone(),
@@ -114,6 +142,7 @@ impl AppState {
                 nickname: nickname.to_string(),
             },
             now,
+            &key,
         )
     }
 }

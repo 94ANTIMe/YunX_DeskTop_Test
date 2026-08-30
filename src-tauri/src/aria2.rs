@@ -122,25 +122,32 @@ pub async fn start(app: AppHandle) {
     match shell.sidecar("aria2c") {
         Ok(cmd) => {
             engine_log(&app, "start: sidecar 已解析，准备 spawn");
-            let cmd = cmd.args([
-            "--enable-rpc",
-            &format!("--rpc-listen-port={RPC_PORT}"),
-            &format!("--rpc-secret={}", rpc_secret()),
-            &format!("--dir={}", download_dir.display()),
-            "--continue=true",
-            &format!("--max-concurrent-downloads={}", settings.max_concurrent_downloads.max(1)),
-            &format!("--split={}", settings.download_threads.clamp(1, 64)),
-            &format!("--max-connection-per-server={}", settings.download_conn_per_server.clamp(1, 16)),
-            &format!("--min-split-size={}M", settings.download_min_split_mb.clamp(1, 64)),
-            "--file-allocation=none",
-            "--allow-overwrite=true",
-            "--auto-file-renaming=true",
-            &format!("--max-tries={}", settings.download_retry_count.clamp(0, 10)),
-            "--retry-wait=3",
-            &format!("--max-overall-download-limit={}", limit_str(settings.download_speed_limit)),
-            "--console-log-level=warn",
-            &format!("--stop-with-process={}", std::process::id()),
-        ]);
+            let mut args = vec![
+                "--enable-rpc".to_string(),
+                format!("--rpc-listen-port={RPC_PORT}"),
+                format!("--rpc-secret={}", rpc_secret()),
+                format!("--dir={}", download_dir.display()),
+                "--continue=true".to_string(),
+                format!("--max-concurrent-downloads={}", settings.max_concurrent_downloads.max(1)),
+                format!("--split={}", settings.download_threads.clamp(1, 64)),
+                format!("--max-connection-per-server={}", settings.download_conn_per_server.clamp(1, 16)),
+                format!("--min-split-size={}M", settings.download_min_split_mb.clamp(1, 64)),
+                "--file-allocation=none".to_string(),
+                "--allow-overwrite=true".to_string(),
+                "--auto-file-renaming=true".to_string(),
+                format!("--max-tries={}", settings.download_retry_count.clamp(0, 10)),
+                "--retry-wait=3".to_string(),
+                format!("--max-overall-download-limit={}", limit_str(settings.download_speed_limit)),
+                "--console-log-level=warn".to_string(),
+                format!("--stop-with-process={}", std::process::id()),
+            ];
+            // 代理注入（设置开启且填写完整时；aria2 全局代理影响所有连接）
+            if proxy_configured(&settings) {
+                let proxy = build_proxy_arg(&settings);
+                args.push(format!("--all-proxy={proxy}"));
+                engine_log(&app, &format!("start: 已注入代理 --all-proxy={proxy}"));
+            }
+            let cmd = cmd.args(args);
             match cmd.spawn() {
                 Ok((mut rx, _child)) => {
                     engine_log(&app, "start: aria2 进程已 spawn");
@@ -199,6 +206,33 @@ fn limit_str(limit: i64) -> String {
     } else {
         format!("{}B", limit) // aria2 接受 "1048576B" 形式
     }
+}
+
+/// 构建 `--all-proxy` 参数（http / socks5，含可选用户密码，密码经 URL 编码）
+pub(crate) fn build_proxy_arg(settings: &Settings) -> String {
+    let scheme = if settings.proxy_type.eq_ignore_ascii_case("socks5") { "socks5" } else { "http" };
+    let mut url = format!("{scheme}://");
+    if !settings.proxy_username.is_empty() {
+        url.push_str(&urlencoding::encode(&settings.proxy_username));
+        url.push(':');
+        if !settings.proxy_password.is_empty() {
+            url.push_str(&urlencoding::encode(&settings.proxy_password));
+        }
+        url.push('@');
+    }
+    url.push_str(settings.proxy_host.trim());
+    if settings.proxy_port > 0 {
+        url.push(':');
+        url.push_str(&settings.proxy_port.to_string());
+    }
+    url
+}
+
+/// 设置中代理是否已填完整（可用）
+pub(crate) fn proxy_configured(settings: &Settings) -> bool {
+    settings.proxy_enabled
+        && !settings.proxy_host.trim().is_empty()
+        && settings.proxy_port > 0
 }
 
 // ---------- 任务入队 / 控制 ----------
@@ -711,11 +745,18 @@ pub async fn detail(app: &AppHandle, id: i64) -> AppResult<DownloadDetail> {
     })
 }
 
-/// 设置变更后同步 aria2（限速 / 并发 / 目录）
-pub async fn apply_settings(_app: &AppHandle, settings: &Settings) {
-    let options = json!({
+/// 设置变更后同步 aria2（限速 / 并发 / 代理）。
+/// 注意：aria2 对 all-proxy 的运行中修改支持有限，代理变更彻底生效仍需重启引擎
+///（重启后由启动参数 --all-proxy 注入）；此处 best-effort 尝试即时更新。
+pub async fn apply_settings(app: &AppHandle, settings: &Settings) {
+    let mut options = json!({
         "max-overall-download-limit": limit_str(settings.download_speed_limit),
         "max-concurrent-downloads": settings.max_concurrent_downloads.max(1),
     });
-    let _ = rpc_call("aria2.changeGlobalOption", vec![options]).await;
+    if proxy_configured(settings) {
+        options["all-proxy"] = json!(build_proxy_arg(settings));
+    }
+    if rpc_call("aria2.changeGlobalOption", vec![options]).await.is_err() {
+        engine_log(app, "apply_settings: changeGlobalOption 失败（代理/限速可能需要重启引擎后生效）");
+    }
 }

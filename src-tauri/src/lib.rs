@@ -2,6 +2,7 @@ mod api;
 mod aria2;
 mod clipboard;
 mod commands;
+mod crypto;
 mod db;
 mod error;
 mod logger;
@@ -85,12 +86,15 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::accounts::list_accounts,
+            commands::accounts::list_account_rows,
+            commands::accounts::switch_account,
             commands::accounts::logout,
             commands::accounts::web_login_start,
             commands::accounts::web_login_cancel,
             commands::accounts::xunlei_login,
             commands::accounts::xunlei_sms_login,
             commands::accounts::pan123_login,
+            commands::network::test_proxy,
             commands::resolve::parse_share_link,
             commands::resolve::resolve_share,
             commands::resolve::list_share_files,
@@ -100,6 +104,7 @@ pub fn run() {
             commands::resolve::list_logs,
             commands::resolve::clear_logs,
             commands::search::pansou_search,
+            commands::search::pansou_ping,
             commands::download::enqueue_download,
             commands::download::pause_download,
             commands::download::resume_download,

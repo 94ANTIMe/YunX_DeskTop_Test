@@ -113,6 +113,18 @@ pub struct AccountSummary {
     pub logged_in: bool,
 }
 
+/// 平台账号行（多账号切换列表）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRow {
+    pub platform: String,
+    pub key: String,
+    pub nickname: String,
+    pub updated_at: i64,
+    /// 是否为当前选中账号
+    pub active: bool,
+}
+
 /// 应用设置（app_data_dir/settings.json 持久化；键语义对齐 Android SettingsRepository）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -147,6 +159,19 @@ pub struct Settings {
     pub auto_launch: bool,
     /// 导航胶囊显示「搜索」Tab（默认关）
     pub show_search_tab: bool,
+    /// 代理开关（默认关；aria2 全局限速走 --all-proxy）
+    pub proxy_enabled: bool,
+    /// 代理协议："http" | "socks5"
+    pub proxy_type: String,
+    pub proxy_host: String,
+    pub proxy_port: u16,
+    pub proxy_username: String,
+    /// 代理密码（落盘经 DPAPI 加密）
+    pub proxy_password: String,
+    /// 平台当前选中账号（platform → 账号 key；缺省回退平台 key 的旧行）
+    pub active_account_keys: std::collections::BTreeMap<String, String>,
+    /// 首启引导已完成
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -167,6 +192,14 @@ impl Default for Settings {
             download_notify: true,
             auto_launch: false,
             show_search_tab: false,
+            proxy_enabled: false,
+            proxy_type: "http".into(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            active_account_keys: std::collections::BTreeMap::new(),
+            onboarded: false,
         }
     }
 }

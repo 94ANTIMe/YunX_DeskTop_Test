@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, LogIn, LogOut } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, LogIn, LogOut } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import LoginDialog from "../components/LoginDialog";
-import { errMsg, ipc, onLoginSuccess, type AccountSummary } from "../lib/ipc";
+import { errMsg, ipc, onLoginSuccess, type AccountRow, type AccountSummary } from "../lib/ipc";
 import driveHero from "../assets/art/drive-hero.jpg";
 
 interface DrivePlatform {
@@ -28,6 +28,10 @@ const PLATFORMS: DrivePlatform[] = [
 /** 网盘页：账号登录/登出（登录方式：夸克/UC/百度/139 WebView；迅雷密码+短信；123 账密 JWT） */
 export default function DrivePage() {
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
+  // 各平台账号行缓存（拉开下拉时按需加载）
+  const [rows, setRows] = useState<Record<string, AccountRow[]>>({});
+  // 当前展开的账号下拉（platform | null）
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [loginPlatform, setLoginPlatform] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -44,6 +48,7 @@ export default function DrivePage() {
     let unlisten: (() => void) | null = null;
     onLoginSuccess(() => {
       setLoginPlatform(null);
+      setRows({});
       refresh();
     }).then((f) => {
       unlisten = f;
@@ -53,10 +58,43 @@ export default function DrivePage() {
     };
   }, []);
 
-  async function logout(platform: string) {
+  async function logout(platform: string, key?: string) {
     setError("");
     try {
-      await ipc.logout(platform);
+      await ipc.logout(platform, key);
+      setRows((r) => ({ ...r, [platform]: (r[platform] ?? []).filter((x) => x.key !== key) }));
+      await refresh();
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  /** 拉取平台账号行（下拉展开时加载） */
+  async function toggleMenu(platform: string) {
+    if (openMenu === platform) {
+      setOpenMenu(null);
+      return;
+    }
+    setError("");
+    try {
+      const list = await ipc.listAccountRows(platform);
+      setRows((r) => ({ ...r, [platform]: list }));
+      setOpenMenu(platform);
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  /** 切换到指定账号行 */
+  async function switchTo(platform: string, key: string) {
+    setError("");
+    try {
+      await ipc.switchAccount(platform, key);
+      setOpenMenu(null);
+      setRows((r) => ({
+        ...r,
+        [platform]: (r[platform] ?? []).map((x) => ({ ...x, active: x.key === key })),
+      }));
       await refresh();
     } catch (e) {
       setError(errMsg(e));
@@ -110,9 +148,60 @@ export default function DrivePage() {
               </div>
               {p.note && <p className="mt-2 text-[11px] text-clay-deep">{p.note}</p>}
               <div className="mt-4 flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">
-                  {acc?.loggedIn ? (acc.nickname || "已登录") : "未登录"}
-                </span>
+                {acc?.loggedIn ? (
+                  <div className="relative min-w-0 flex-1">
+                    {/* 当前账号 + 展开下拉 */}
+                    <button
+                      onClick={() => toggleMenu(p.id)}
+                      className="flex w-full items-center gap-1.5 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 py-1.5 text-xs text-ink transition-colors hover:border-clay"
+                      title="切换账号"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {acc.nickname || "已登录"}
+                      </span>
+                      <ChevronDown
+                        size={13}
+                        className={`shrink-0 text-ink-soft transition-transform ${openMenu === p.id ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                    {openMenu === p.id && (
+                      <div className="absolute right-0 top-full z-20 mt-1 w-64 overflow-hidden rounded-ctrl border border-ink/10 bg-carrier shadow-lg">
+                        <p className="border-b border-ink/10 px-3 py-2 text-[10px] uppercase tracking-wider text-ink-soft">
+                          账号列表 · 点击切换
+                        </p>
+                        {(rows[p.id] ?? []).length === 0 && (
+                          <p className="px-3 py-2.5 text-xs text-ink-soft/70">暂无其他账号</p>
+                        )}
+                        {rows[p.id]?.map((row) => (
+                          <button
+                            key={row.key}
+                            onClick={() => switchTo(p.id, row.key)}
+                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-ivory ${
+                              row.active ? "bg-ivory text-ink" : "text-ink-soft"
+                            }`}
+                          >
+                            <span className="min-w-0 flex-1 truncate">{row.nickname || "已登录"}</span>
+                            {row.active && <Check size={13} className="shrink-0 text-clay" />}
+                            {!row.active && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  logout(p.id, row.key);
+                                }}
+                                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-ink-soft/70 hover:bg-clay/10 hover:text-clay-deep"
+                                title="退出该账号"
+                              >
+                                退
+                              </button>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">未登录</span>
+                )}
                 <button
                   onClick={() => openUrl(p.home).catch(() => {})}
                   className="flex shrink-0 items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
