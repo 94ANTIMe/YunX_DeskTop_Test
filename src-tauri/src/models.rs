@@ -79,6 +79,16 @@ pub struct ShareFilePage {
     pub has_more: bool,
 }
 
+/// 文件夹收集结果（文件 + 相对目录，用于还原目录结构保存）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectedFile {
+    #[serde(flatten)]
+    pub file: ShareFile,
+    /// 相对目录路径（含子目录名，如 `影视/2024`；根级文件为空）
+    pub rel_dir: String,
+}
+
 /// 下载直链结果（含下载所需请求头）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

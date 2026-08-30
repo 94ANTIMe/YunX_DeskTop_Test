@@ -90,6 +90,19 @@ export interface ShareFilePage {
   hasMore: boolean;
 }
 
+/** 文件夹收集结果（携带相对目录，还原文件夹结构保存） */
+export interface CollectedFile {
+  fid: string;
+  fname: string;
+  fsize: number;
+  isdir: boolean;
+  pdirFid: string;
+  fidToken: string;
+  modifyTime: string;
+  /** 相对目录路径（含子目录名；根级文件为空） */
+  relDir: string;
+}
+
 export interface DownloadLink {
   url: string;
   filename: string;
@@ -239,7 +252,7 @@ export const ipc = {
   listShareFiles: (sessionKey: string, dirId: string, page?: number) =>
     invoke<ShareFilePage>("list_share_files", { sessionKey, dirId, page }),
   collectFolderFiles: (sessionKey: string, dirId: string) =>
-    invoke<ShareFile[]>("collect_folder_files", { sessionKey, dirId }),
+    invoke<CollectedFile[]>("collect_folder_files", { sessionKey, dirId }),
   getDownloadLink: (sessionKey: string, file: ShareFile) =>
     invoke<DownloadLink>("get_download_link", { sessionKey, file }),
 
@@ -291,4 +304,9 @@ export function onClipboardShare(
   handler: (e: ClipboardShareEvent) => void
 ): Promise<UnlistenFn> {
   return listen<ClipboardShareEvent>("clipboard:share-detected", (e) => handler(e.payload));
+}
+
+/** 设置保存后通知（导航胶囊「搜索」显隐等即时生效） */
+export function onSettingsUpdated(handler: (s: Settings) => void): Promise<UnlistenFn> {
+  return listen<Settings>("settings:updated", (e) => handler(e.payload));
 }

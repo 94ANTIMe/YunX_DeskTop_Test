@@ -189,12 +189,15 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setFolderProgress({ name: entry.fname, done: 0, total: collected.length });
       let done = 0;
       let failed = 0;
-      for (const file of collected) {
+      for (const cf of collected) {
         try {
-          const link = await ipc.getDownloadLink(session.sessionKey, file);
+          const link = await ipc.getDownloadLink(session.sessionKey, cf);
+          // 携带相对目录，还原分享文件夹结构（aria2 out 支持子目录路径）
+          const base = link.filename || cf.fname;
+          const outName = cf.relDir ? `${cf.relDir}/${base}` : base;
           await ipc.enqueueDownload(
             link.url,
-            link.filename || file.fname,
+            outName,
             link.headers,
             link.platform,
             link.cleanupId || undefined,

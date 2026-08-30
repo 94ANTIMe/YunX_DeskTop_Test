@@ -10,7 +10,7 @@ import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import { useTheme } from "./hooks/useTheme";
 import { useUpdate } from "./hooks/useUpdate";
-import { ipc, onClipboardShare, type ClipboardShareEvent } from "./lib/ipc";
+import { ipc, onClipboardShare, onSettingsUpdated, type ClipboardShareEvent } from "./lib/ipc";
 import type { TabId } from "./lib/tabs";
 
 /** 应用壳：顶部居中悬浮胶囊 + 内容区。
@@ -57,6 +57,17 @@ export default function App() {
           ? prev
           : share
       );
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  // 设置保存后即时生效（搜索胶囊显隐、剪贴板监听开关）
+  useEffect(() => {
+    const un = onSettingsUpdated((s) => {
+      setShowSearchTab(s.showSearchTab);
+      setClipboardOn(s.clipboardMonitor);
     });
     return () => {
       un.then((f) => f());

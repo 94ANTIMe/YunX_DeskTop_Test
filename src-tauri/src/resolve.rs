@@ -12,7 +12,7 @@ use crate::db::accounts::{self, Account};
 use crate::error::{AppError, AppResult};
 use crate::logger;
 use crate::models::{
-    DownloadLink, Platform, ResolveSessionInfo, ShareFile, ShareFilePage,
+    CollectedFile, DownloadLink, Platform, ResolveSessionInfo, ShareFile, ShareFilePage,
 };
 use crate::state::AppState;
 
@@ -328,11 +328,12 @@ pub async fn list_share_files(
 
 // ---------- 递归收集目录下全部文件（文件夹下载用） ----------
 
+/// 递归收集目录下全部文件；顺带记录相对目录（还原文件夹结构保存）
 pub async fn collect_folder_files(
     state: &AppState,
     session_key: &str,
     dir_id: &str,
-) -> AppResult<Vec<ShareFile>> {
+) -> AppResult<Vec<CollectedFile>> {
     let mut all = Vec::new();
     let mut page = 1i64;
     loop {
@@ -340,10 +341,18 @@ pub async fn collect_folder_files(
         let has_more = page_result.has_more;
         for f in page_result.files {
             if f.isdir {
-                let sub = Box::pin(collect_folder_files(state, session_key, &f.fid)).await?;
+                let mut sub = Box::pin(collect_folder_files(state, session_key, &f.fid)).await?;
+                // 子目录内文件相对路径前插当前目录名
+                for cf in sub.iter_mut() {
+                    cf.rel_dir = if cf.rel_dir.is_empty() {
+                        f.fname.clone()
+                    } else {
+                        format!("{}/{}", f.fname, cf.rel_dir)
+                    };
+                }
                 all.extend(sub);
             } else {
-                all.push(f);
+                all.push(CollectedFile { file: f, rel_dir: String::new() });
             }
         }
         if !has_more || page > 20 {

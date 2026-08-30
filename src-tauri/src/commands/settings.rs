@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::AppResult;
 use crate::models::Settings;
@@ -19,6 +19,8 @@ pub async fn update_settings(app: AppHandle, settings: Settings) -> AppResult<()
     let prev = state.load_settings();
     state.save_settings(&settings)?;
     crate::aria2::apply_settings(&app, &settings).await;
+    // 通知前端设置已变更（导航胶囊「搜索」显隐、剪贴板开关等立即生效）
+    let _ = app.emit("settings:updated", &settings);
     // 开机自启状态与操作系统对齐（仅在值变化时写，避免每次保存都触发注册表写入）
     if prev.auto_launch != settings.auto_launch {
         let res = if settings.auto_launch {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Loader2, Minimize2, Power, RefreshCw, Search } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
@@ -10,7 +10,7 @@ import type { ThemeMode } from "../hooks/useTheme";
 import type { TabId } from "../lib/tabs";
 import aboutHero from "../assets/art/about-lighthouse.jpg";
 
-const GITHUB_URL = "https://github.com/CYQawa/YunX";
+const GITHUB_URL = "https://github.com/94ANTIMe/YunX_DeskTop_Test";
 
 /** 开关行（通用设置区块复用） */
 function ToggleRow({
@@ -540,7 +540,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                 </button>
                 {updater.info?.browserDownloadUrl && (
                   <button
-                    onClick={() => window.open(updater.info!.browserDownloadUrl, "_blank")}
+                    onClick={() => openUrl(updater.info!.browserDownloadUrl).catch(() => {})}
                     className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep"
                   >
                     <ExternalLink size={13} />
@@ -570,20 +570,18 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
         <div className="min-w-0 flex-1">
           <p className="font-mono text-[10px] tracking-[0.25em] text-ink-soft">ABOUT</p>
           <h3 className="mt-1.5 font-display text-2xl font-semibold text-ink">
-            云析 <span className="font-mono text-base font-normal text-ink-soft">YunX Desktop</span>
+            YunX_DeskTop_Test{" "}
+            <span className="font-mono text-base font-normal text-ink-soft">94ANTIMe</span>
           </h3>
           <p className="mt-1 text-sm text-ink-soft">
-            网盘分享链接解析与高速下载 · aria2 引擎
-            <span className="ml-2 font-mono text-xs text-clay-deep">
-              v{info?.version ?? "…"}
-            </span>
+            网盘分享链接解析与高速下载 · v{info?.version ?? "…"}
           </p>
           <button
-            onClick={() => window.open(GITHUB_URL, "_blank")}
+            onClick={() => openUrl(GITHUB_URL).catch(() => {})}
             className="mt-4 flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep"
           >
             <ExternalLink size={14} />
-            GitHub 仓库 · AGPL-3.0
+            GitHub 仓库
           </button>
         </div>
         <img
@@ -605,7 +603,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
           {ACKNOWLEDGEMENTS.map((a) => (
             <li key={a.name}>
               <button
-                onClick={() => window.open(a.url, "_blank")}
+                onClick={() => openUrl(a.url).catch(() => {})}
                 className="flex w-full items-center gap-3 rounded-ctrl border border-ink/10 bg-carrier-deep px-3.5 py-2.5 text-left transition-colors hover:border-clay hover:bg-ivory"
               >
                 <span className="shrink-0 font-mono text-sm font-semibold text-ink">{a.name}</span>

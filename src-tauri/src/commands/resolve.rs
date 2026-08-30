@@ -2,7 +2,9 @@ use tauri::{AppHandle, Manager};
 
 use crate::error::{AppError, AppResult};
 use crate::logger;
-use crate::models::{DownloadLink, ParsedShare, ResolveSessionInfo, ShareFile, ShareFilePage};
+use crate::models::{
+    CollectedFile, DownloadLink, ParsedShare, ResolveSessionInfo, ShareFile, ShareFilePage,
+};
 use crate::state::AppState;
 
 /// 解析分享链接（平台识别 + 提取码）
@@ -50,13 +52,13 @@ pub async fn list_share_files(
     result
 }
 
-/// 递归收集目录下全部文件（文件夹下载用）
+/// 递归收集目录下全部文件（文件夹下载用；携带相对目录还原结构）
 #[tauri::command]
 pub async fn collect_folder_files(
     app: AppHandle,
     session_key: String,
     dir_id: String,
-) -> AppResult<Vec<ShareFile>> {
+) -> AppResult<Vec<CollectedFile>> {
     let state = app.state::<AppState>();
     state.log(logger::INFO, "", "collect", "开始收集文件夹文件", &format!("dir={dir_id}"));
     let result = crate::resolve::collect_folder_files(&state, &session_key, &dir_id).await;
@@ -67,7 +69,7 @@ pub async fn collect_folder_files(
                 "",
                 "collect",
                 &format!("收集完成：共 {} 个文件", files.len()),
-                &files.iter().map(|f| f.fname.as_str()).take(20).collect::<Vec<_>>().join("、"),
+                &files.iter().map(|f| f.file.fname.as_str()).take(20).collect::<Vec<_>>().join("、"),
             );
         }
         Err(e) => {

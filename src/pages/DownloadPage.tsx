@@ -8,7 +8,7 @@ import {
   Loader2,
   Pause,
   Play,
-  RotateCcw,
+  Square,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -208,6 +208,26 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
   const active = tasks.filter((t) => t.status === 1);
   const totalSpeed = active.reduce((s, t) => s + t.speed, 0);
 
+  /** 全部暂停 */
+  async function pauseAll() {
+    setError("");
+    try {
+      await ipc.pauseAllDownloads();
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  /** 全部继续 */
+  async function resumeAll() {
+    setError("");
+    try {
+      await ipc.resumeAllDownloads();
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
   // 一键清空全部任务记录
   async function clearAll() {
     setError("");
@@ -233,14 +253,32 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
                 {active.length} 个任务进行中 · 共 {tasks.length} 个
               </p>
             </div>
-            <button
-              onClick={clearAll}
-              className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
-              title="一键删除全部下载任务记录"
-            >
-              <Trash2 size={13} />
-              清空记录
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={pauseAll}
+                className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+                title="暂停全部进行中 / 排队任务"
+              >
+                <Pause size={13} />
+                全部暂停
+              </button>
+              <button
+                onClick={resumeAll}
+                className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+                title="继续全部暂停任务"
+              >
+                <Play size={13} />
+                全部继续
+              </button>
+              <button
+                onClick={clearAll}
+                className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+                title="取消并移除全部下载任务记录"
+              >
+                <Trash2 size={13} />
+                全部取消
+              </button>
+            </div>
           </div>
         )}
       </PageHeader>
@@ -335,33 +373,22 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
                       <button
                         onClick={() => act(task.id, () => ipc.pauseDownload(task.id))}
                         disabled={busyId === task.id}
-                        className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-carrier-deep hover:text-ink disabled:opacity-40"
-                        title="暂停"
+                        className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep disabled:opacity-40"
+                        title="暂停该任务（可继续）"
                       >
-                        <Pause size={15} />
+                        <Pause size={13} />
+                        暂停
                       </button>
                     )}
                     {(task.status === 2 || task.status === 4) && (
                       <button
                         onClick={() => act(task.id, () => ipc.resumeDownload(task.id))}
                         disabled={busyId === task.id}
-                        className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-carrier-deep hover:text-ink disabled:opacity-40"
-                        title="继续"
+                        className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-cactus hover:text-cactus disabled:opacity-40"
+                        title="继续该任务"
                       >
-                        <Play size={15} />
-                      </button>
-                    )}
-                    {failed && (
-                      <button
-                        onClick={() => act(task.id, async () => {
-                          await ipc.removeDownloadTask(task.id, false);
-                          setTasks((t) => t.filter((x) => x.id !== task.id));
-                        })}
-                        disabled={busyId === task.id}
-                        className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-carrier-deep hover:text-ink disabled:opacity-40"
-                        title="移除失败任务"
-                      >
-                        <RotateCcw size={15} />
+                        <Play size={13} />
+                        继续
                       </button>
                     )}
                     <button
@@ -370,15 +397,16 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
                         setTasks((t) => t.filter((x) => x.id !== task.id));
                       })}
                       disabled={busyId === task.id}
-                      className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-clay/10 hover:text-clay-deep disabled:opacity-40"
-                      title="删除任务"
+                      className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:bg-clay/10 hover:text-clay-deep disabled:opacity-40"
+                      title="取消该任务并移除记录"
                     >
-                      <Trash2 size={15} />
+                      <Square size={12} />
+                      取消
                     </button>
                     {/* Dashboard 开关 */}
                     <button
                       onClick={() => toggleDetail(task.id)}
-                      className={`rounded-ctrl border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                      className={`flex items-center gap-1 rounded-ctrl border px-3 py-1.5 text-xs font-medium transition-colors ${
                         open
                           ? "border-clay bg-clay/10 text-clay-deep"
                           : "border-ink/15 text-ink-soft hover:border-clay hover:text-clay-deep"
@@ -388,7 +416,7 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
                       详情
                       <ChevronDown
                         size={12}
-                        className={`ml-1 inline transition-transform ${open ? "rotate-180" : ""}`}
+                        className={`transition-transform ${open ? "rotate-180" : ""}`}
                       />
                     </button>
                   </div>
