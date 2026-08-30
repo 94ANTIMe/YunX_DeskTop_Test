@@ -16,6 +16,15 @@ fn str_or(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// 取 id 字段（fs_id 等可能是字符串或数字，统一转字符串）
+fn id_or(v: &Value, key: &str) -> String {
+    match v.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
 fn i64_or(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
 }
@@ -158,8 +167,8 @@ pub async fn list_share(
             || item.get("isdir").and_then(|x| x.as_i64()) == Some(1);
         let path = str_or(item, "path");
         files.push(ShareFile {
-            // 目录用 path 作 fid（导航传参），文件用 fs_id（转存传参）
-            fid: if isdir { path.clone() } else { str_or(item, "fs_id") },
+            // 目录用 path 作 fid（导航传参），文件用 fs_id（转存传参；fs_id 可能是字符串或数字）
+            fid: if isdir { path.clone() } else { id_or(item, "fs_id") },
             fname: str_or(item, "server_filename"),
             fsize: i64_or(item, "size"),
             isdir,
@@ -269,8 +278,8 @@ pub async fn transfer(
     check_errno(&v, "转存失败")?;
     let first = v.pointer("/extra/list/0").cloned().unwrap_or(Value::Null);
     let fs_id_new = {
-        let s = str_or(&first, "to_fs_id");
-        if s.is_empty() { str_or(&first, "from_fs_id") } else { s }
+        let s = id_or(&first, "to_fs_id");
+        if s.is_empty() { id_or(&first, "from_fs_id") } else { s }
     };
     if fs_id_new.is_empty() {
         return Err(AppError::Api("转存失败：未返回新文件".into()));
