@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::api::{baidu, c139, pan123, quark, uc, xunlei};
 use crate::db::accounts::{self, Account};
 use crate::error::{AppError, AppResult};
+use crate::logger;
 use crate::models::{
     DownloadLink, Platform, ResolveSessionInfo, ShareFile, ShareFilePage,
 };
@@ -430,11 +431,22 @@ pub async fn get_download_link(
         Platform::Baidu => {
             let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
             let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
-            let (_new_fs_id, new_path) = baidu::transfer(
+            state.log(logger::INFO, "baidu", "transfer", "开始转存", &format!("{} → {}", file.fname, temp_dir));
+            let (new_fs_id, new_path) = baidu::transfer(
                 &state.http, &session.baidu_share_id, &session.baidu_uk, &session.sekey, &file.fid, &temp_dir, &cookie,
             )
-            .await?;
-            let url = baidu::locate_download(&state.http, &new_path, &cookie).await?;
+            .await
+            .map_err(|e| {
+                state.log(logger::ERROR, "baidu", "transfer", &format!("转存失败：{}", file.fname), &e.to_string());
+                e
+            })?;
+            state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
+            let url = baidu::locate_download(&state.http, &new_path, &cookie)
+                .await
+                .map_err(|e| {
+                    state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
+                    e
+                })?;
             // 取链后即时清理（locatedownload 直链自带 sign/expires，删除不影响）
             let _ = baidu::delete_file(&state.http, &new_path, &cookie).await;
             Ok(DownloadLink {

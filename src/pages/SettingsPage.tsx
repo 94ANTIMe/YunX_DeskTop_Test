@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { ExternalLink, FolderOpen, Loader2, Search } from "lucide-react";
+import { Download, ExternalLink, FolderOpen, Loader2, RefreshCw, Search } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
+import { useUpdate } from "../hooks/useUpdate";
 import { formatBytes } from "../lib/format";
 import type { ThemeMode } from "../hooks/useTheme";
 import type { TabId } from "../lib/tabs";
@@ -64,6 +65,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const updater = useUpdate();
 
   // 初始加载（失败回退默认值，避免区块整体不渲染）
   useEffect(() => {
@@ -352,6 +354,120 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
           </div>
           <p className="mt-3 text-xs text-ink-soft/70">
             PanSou 是可自部署的网盘聚合搜索服务（fish2018/pansou），填入服务根地址后即可在「搜索」页搜全网公开分享资源；留空则关闭搜索功能。
+          </p>
+        </section>
+      )}
+
+      {/* 更新 */}
+      {s && (
+        <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "165ms" }}>
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-ink">更新（GitHub Releases）</h3>
+            {(updater.checking || updater.downloading) && (
+              <Loader2 size={14} className="animate-spin text-clay" />
+            )}
+          </div>
+
+          {/* 自动检查开关 */}
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm text-ink-soft">启动时自动检查更新</p>
+              <p className="mt-0.5 text-xs text-ink-soft/70">关闭后仅可在本页手动点「检查更新」</p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={s.autoCheckUpdate}
+              onClick={() => persist({ ...s, autoCheckUpdate: !s.autoCheckUpdate })}
+              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                s.autoCheckUpdate ? "bg-clay" : "bg-ink/15"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+                  s.autoCheckUpdate ? "left-[22px]" : "left-0.5"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* 版本与检查 */}
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-ink/10 pt-4">
+            <span className="text-sm text-ink-soft">
+              当前 <span className="font-mono text-ink">v{info?.version ?? "…"}</span>
+            </span>
+            {updater.info?.hasUpdate ? (
+              <span className="text-sm text-clay-deep">
+                → 发现新版 <span className="font-mono">v{updater.info.latestVersion}</span>
+              </span>
+            ) : updater.checked ? (
+              <span className="text-sm text-cactus">已是最新版本</span>
+            ) : null}
+            <button
+              onClick={() => updater.check()}
+              disabled={updater.checking || updater.downloading}
+              className="ml-auto flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={updater.checking ? "animate-spin" : ""} />
+              检查更新
+            </button>
+          </div>
+
+          {/* 下载 / 更新操作 */}
+          {updater.info?.hasUpdate && (
+            <div className="mt-4 border-t border-ink/10 pt-4">
+              {updater.downloading && updater.progress && (
+                <div className="mb-3 flex items-center gap-2">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink/10">
+                    <div
+                      className="h-full rounded-full bg-clay transition-all"
+                      style={{
+                        width: `${
+                          updater.progress.total > 0
+                            ? Math.min(100, (updater.progress.received / updater.progress.total) * 100)
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <span className="font-mono text-[11px] text-ink-soft">
+                    {updater.progress.total > 0
+                      ? `${((updater.progress.received / updater.progress.total) * 100).toFixed(0)}%`
+                      : "…"}
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    const path = await updater.download();
+                    if (path) updater.install(path);
+                  }}
+                  disabled={updater.downloading || updater.installing}
+                  className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-white transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
+                >
+                  <Download size={13} />
+                  {updater.installing ? "正在安装…" : updater.downloading ? "下载中…" : "立即更新"}
+                </button>
+                {updater.info?.browserDownloadUrl && (
+                  <button
+                    onClick={() => window.open(updater.info!.browserDownloadUrl, "_blank")}
+                    className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep"
+                  >
+                    <ExternalLink size={13} />
+                    前往发布页
+                  </button>
+                )}
+              </div>
+              {updater.error && (
+                <p className="mt-2 text-xs text-clay-deep">{updater.error}</p>
+              )}
+              {updater.installing && (
+                <p className="mt-2 text-xs text-ink-soft">将退出应用并自动重启完成更新…</p>
+              )}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-ink-soft/70">
+            更新包为 NSIS 安装包（x64-setup.exe），应用内下载后静默安装并覆盖旧版；安装完成后自动重启新版本。
           </p>
         </section>
       )}
