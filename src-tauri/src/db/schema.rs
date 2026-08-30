@@ -77,4 +77,11 @@ CREATE TABLE IF NOT EXISTS app_log (
     message TEXT NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS resolve_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    link TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    create_time INTEGER NOT NULL
+);
 "#;

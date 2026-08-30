@@ -198,3 +198,14 @@ pub struct BookmarkRow {
     pub category: String,
     pub create_time: i64,
 }
+
+/// 解析历史记录（对齐 resolve_history 表）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveHistoryRow {
+    pub id: i64,
+    pub link: String,
+    pub title: String,
+    pub platform: String,
+    pub create_time: i64,
+}

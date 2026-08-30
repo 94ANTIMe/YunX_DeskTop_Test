@@ -7,12 +7,13 @@ import {
   ChevronRight,
   FileText,
   FolderOpen,
+  History,
   Link2,
   Loader2,
   Trash2,
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
+import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
 import resolveHero from "../assets/art/resolve-hero.jpg";
@@ -48,6 +49,8 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [folderProgress, setFolderProgress] = useState<{ name: string; done: number; total: number } | null>(null);
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [bookmarks, setBookmarks] = useState<BookmarkRow[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<ResolveHistory[]>([]);
   const noticeTimer = useRef<number | undefined>(undefined);
 
   const showNotice = (msg: string) => {
@@ -70,6 +73,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setDirStack([{ fid: "0", name: info.title || "根目录" }]);
       setPage(1);
       if (info.title) showNotice(`已解析：${info.title}`);
+      ipc.listResolveHistory().then(setHistory).catch(() => {});
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -242,6 +246,34 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     }
   }
 
+  // 解析历史
+  async function openHistory() {
+    try {
+      setHistory(await ipc.listResolveHistory());
+      setShowHistory(true);
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  async function removeHistory(id: number) {
+    try {
+      await ipc.deleteResolveHistory(id);
+      setHistory((h) => h.filter((x) => x.id !== id));
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  async function clearHistory() {
+    try {
+      await ipc.clearResolveHistory();
+      setHistory([]);
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
   // 输入变化自动匹配提取码（文本中「提取码: xxxx」）
   useEffect(() => {
     if (!input) return;
@@ -267,6 +299,13 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           >
             <Bookmark size={14} />
             收藏夹
+          </button>
+          <button
+            onClick={openHistory}
+            className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep"
+          >
+            <History size={14} />
+            解析记录
           </button>
         </div>
       </PageHeader>
@@ -484,6 +523,78 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                         onClick={() => removeBookmark(b.id)}
                         className="shrink-0 rounded-ctrl p-1.5 text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
                         title="删除收藏"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 解析记录浮层 */}
+      {showHistory && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20 p-8 backdrop-blur-sm"
+          onClick={() => setShowHistory(false)}
+        >
+          <div
+            className="max-h-[70vh] w-full max-w-lg animate-rise overflow-hidden rounded-card bg-carrier shadow-capsule"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-ink/10 px-6 py-4">
+              <h3 className="font-display text-lg font-semibold text-ink">解析记录</h3>
+              <div className="flex items-center gap-2">
+                {history.length > 0 && (
+                  <button
+                    onClick={clearHistory}
+                    className="rounded-ctrl px-2.5 py-1 text-xs text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
+                  >
+                    清空记录
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="rounded-ctrl px-2 py-1 text-xs text-ink-soft hover:bg-carrier-deep hover:text-ink"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div className="max-h-[52vh] overflow-y-auto px-6 py-2">
+              {history.length === 0 ? (
+                <p className="py-10 text-center text-sm text-ink-soft">暂无解析记录</p>
+              ) : (
+                <ul className="divide-y divide-ink/10">
+                  {history.map((h) => (
+                    <li key={h.id} className="flex items-center gap-3 py-3">
+                      <span className="shrink-0 rounded-full bg-carrier-deep px-2 py-0.5 font-mono text-[10px] text-ink-soft">
+                        {platformLabel(h.platform) || "未知"}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-ink">{h.title || "（无标题）"}</p>
+                        <p className="truncate font-mono text-[10px] text-ink-soft/70">{h.link}</p>
+                      </div>
+                      <span className="shrink-0 font-mono text-[10px] text-ink-soft/60">
+                        {new Date(h.createTime).toLocaleDateString()}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setShowHistory(false);
+                          setInput(h.link);
+                          setPwd("");
+                        }}
+                        className="shrink-0 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-white hover:bg-clay-deep"
+                      >
+                        再解析
+                      </button>
+                      <button
+                        onClick={() => removeHistory(h.id)}
+                        className="shrink-0 rounded-ctrl p-1.5 text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
+                        title="删除记录"
                       >
                         <Trash2 size={14} />
                       </button>

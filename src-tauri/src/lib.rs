@@ -60,9 +60,13 @@ pub fn run() {
             commands::download::resume_download,
             commands::download::remove_download_task,
             commands::download::list_download_tasks,
+            commands::download::clear_download_tasks,
             commands::bookmark::list_bookmarks,
             commands::bookmark::add_bookmark,
             commands::bookmark::remove_bookmark,
+            commands::history::list_resolve_history,
+            commands::history::delete_resolve_history,
+            commands::history::clear_resolve_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

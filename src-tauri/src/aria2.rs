@@ -330,6 +330,30 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
     Ok(())
 }
 
+/// 清空全部下载任务记录（aria2 全部 forceRemove + DB 清空）
+pub async fn clear_all(app: &AppHandle) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    // 收集全部 gid 并强制移除（含进行中/等待/暂停）
+    let gids: Vec<String> = {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        let mut stmt = conn.prepare("SELECT gid FROM download_task WHERE gid != ''")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    for gid in gids {
+        let _ = rpc_call("aria2.forceRemove", vec![json!(gid)]).await;
+        let _ = rpc_call("aria2.removeDownloadResult", vec![json!(gid)]).await;
+    }
+    {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.execute("DELETE FROM download_task", [])?;
+    }
+    // 清空后向前端推送空列表
+    let views: Vec<DownloadTaskView> = Vec::new();
+    let _ = app.emit("downloads:updated", &views);
+    Ok(())
+}
+
 // ---------- 工具 ----------
 
 fn gid_of(app: &AppHandle, id: i64) -> AppResult<String> {

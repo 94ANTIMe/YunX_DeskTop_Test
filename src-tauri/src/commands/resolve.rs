@@ -15,7 +15,12 @@ pub fn parse_share_link(text: String) -> AppResult<ParsedShare> {
 #[tauri::command]
 pub async fn resolve_share(app: AppHandle, text: String) -> AppResult<ResolveSessionInfo> {
     let state = app.state::<AppState>();
-    crate::resolve::resolve_share(&state, &text).await
+    let result = crate::resolve::resolve_share(&state, &text).await;
+    if let Ok(info) = &result {
+        // 记录解析历史（供解析页展示/删除）
+        crate::commands::history::record_resolve(&app, &text, &info.platform, &info.title);
+    }
+    result
 }
 
 /// 列出分享目录文件（目录导航 / 翻页）

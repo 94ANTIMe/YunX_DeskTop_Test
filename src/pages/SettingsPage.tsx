@@ -15,21 +15,23 @@ const GITHUB_URL = "https://github.com/CYQawa/YunX";
 const ACKNOWLEDGEMENTS = [
   {
     name: "aria2",
-    license: "GPL-2.0+（含 OpenSSL 例外）",
     role: "多线程高速下载引擎（sidecar）",
     url: "https://github.com/aria2/aria2",
   },
   {
     name: "PanSou",
-    license: "见仓库 LICENSE",
     role: "网盘聚合搜索 API 服务（自部署对接）",
     url: "https://github.com/fish2018/pansou",
   },
   {
     name: "TurboDL",
-    license: "见仓库 LICENSE",
     role: "多线程分片下载优化参考",
     url: "https://github.com/henrique-coder/turbodl",
+  },
+  {
+    name: "YunX",
+    role: "云析 Android 版（同源项目）",
+    url: "https://github.com/CYQawa/YunX",
   },
 ];
 
@@ -391,7 +393,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
         <p className="font-mono text-[10px] tracking-[0.25em] text-ink-soft">OPEN SOURCE</p>
         <h3 className="mt-1.5 text-sm font-semibold text-ink">开源致谢</h3>
         <p className="mt-1 text-xs text-ink-soft/80">
-          本项目依赖 / 参考了以下开源项目，谨此致谢；各项目版权归其作者所有，协议以其仓库 LICENSE 为准。
+          本项目依赖 / 参考了以下开源项目，谨此致谢；各项目版权归其作者所有。
         </p>
         <ul className="mt-4 space-y-2">
           {ACKNOWLEDGEMENTS.map((a) => (
@@ -402,9 +404,6 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
               >
                 <span className="shrink-0 font-mono text-sm font-semibold text-ink">{a.name}</span>
                 <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">{a.role}</span>
-                <span className="shrink-0 rounded-full bg-clay/10 px-2 py-0.5 font-mono text-[10px] text-clay-deep">
-                  {a.license}
-                </span>
                 <ExternalLink size={13} className="shrink-0 text-ink-soft" />
               </button>
             </li>

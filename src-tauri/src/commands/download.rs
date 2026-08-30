@@ -49,3 +49,9 @@ pub async fn remove_download_task(app: AppHandle, id: i64, delete_local: bool) -
 pub fn list_download_tasks(app: AppHandle) -> AppResult<Vec<DownloadTaskView>> {
     aria2::list_tasks(&app)
 }
+
+/// 一键清空全部下载任务记录（强制移除 + DB 清空）
+#[tauri::command]
+pub async fn clear_download_tasks(app: AppHandle) -> AppResult<()> {
+    aria2::clear_all(&app).await
+}

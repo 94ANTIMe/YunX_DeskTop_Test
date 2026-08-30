@@ -112,6 +112,14 @@ export interface Bookmark {
   createTime: number;
 }
 
+export interface ResolveHistory {
+  id: number;
+  link: string;
+  title: string;
+  platform: string;
+  createTime: number;
+}
+
 export interface XunleiLoginStep {
   needSms: boolean;
   creditKey: string;
@@ -187,11 +195,16 @@ export const ipc = {
   removeDownloadTask: (id: number, deleteLocal: boolean) =>
     invoke<void>("remove_download_task", { id, deleteLocal }),
   listDownloadTasks: () => invoke<DownloadTask[]>("list_download_tasks"),
+  clearDownloadTasks: () => invoke<void>("clear_download_tasks"),
 
   listBookmarks: () => invoke<Bookmark[]>("list_bookmarks"),
   addBookmark: (link: string, title: string, pwd: string) =>
     invoke<number>("add_bookmark", { link, title, pwd }),
   removeBookmark: (id: number) => invoke<void>("remove_bookmark", { id }),
+
+  listResolveHistory: () => invoke<ResolveHistory[]>("list_resolve_history"),
+  deleteResolveHistory: (id: number) => invoke<void>("delete_resolve_history", { id }),
+  clearResolveHistory: () => invoke<void>("clear_resolve_history"),
 
   listLogs: (level?: string, limit?: number) =>
     invoke<LogRow[]>("list_logs", { level, limit }),

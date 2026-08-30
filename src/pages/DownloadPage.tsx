@@ -73,15 +73,36 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
   const active = tasks.filter((t) => t.status === 1);
   const totalSpeed = active.reduce((s, t) => s + t.speed, 0);
 
+  // 一键清空全部任务记录
+  async function clearAll() {
+    setError("");
+    try {
+      await ipc.clearDownloadTasks();
+      setTasks([]);
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader tab="download" subtitle="aria2 分片下载 · 断点续传">
         {tasks.length > 0 && (
-          <div className="text-right">
-            <p className="font-mono text-sm text-ink">{formatSpeed(totalSpeed) || "—"}</p>
-            <p className="mt-0.5 text-[11px] text-ink-soft">
-              {active.length} 个任务进行中 · 共 {tasks.length} 个
-            </p>
+          <div className="flex items-center justify-end gap-4">
+            <div className="text-right">
+              <p className="font-mono text-sm text-ink">{formatSpeed(totalSpeed) || "—"}</p>
+              <p className="mt-0.5 text-[11px] text-ink-soft">
+                {active.length} 个任务进行中 · 共 {tasks.length} 个
+              </p>
+            </div>
+            <button
+              onClick={clearAll}
+              className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+              title="一键删除全部下载任务记录"
+            >
+              <Trash2 size={13} />
+              清空记录
+            </button>
           </div>
         )}
       </PageHeader>
