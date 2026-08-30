@@ -1,0 +1,525 @@
+//! 解析编排（对应 Android *ResolveRepository）：
+//! createSession → listFiles → 取链（必要时转存临时目录）→ 清理。
+//! 夸克/UC：token + 分享列表 + 取链（夸克经转存，延迟清理；UC 直取）。
+//! 百度：verify → xpan list → transfer → locatedownload → 即时清理。
+//! 139：匿名列目录 + 登录态取链（AES 加密分享接口）。
+//! 123：匿名列目录 + 登录态签名取链（download-v2 解码 + redirect 跟随）。
+//! 迅雷：getShare → restore 临时目录 → 文件详情取链 → 即时清理。
+use uuid::Uuid;
+
+use crate::api::{baidu, c139, pan123, quark, uc, xunlei};
+use crate::db::accounts::{self, Account};
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    DownloadLink, Platform, ResolveSessionInfo, ShareFile, ShareFilePage,
+};
+use crate::state::AppState;
+
+/// 解析会话（内存态；键 = UUID）
+#[derive(Debug, Clone)]
+pub struct ResolveSession {
+    pub platform: Platform,
+    pub share_id: String,
+    pub pwd: String,
+    pub title: String,
+    // 夸克 / UC
+    pub stoken: String,
+    // 百度
+    pub sekey: String,
+    pub baidu_share_id: String,
+    pub baidu_uk: String,
+    // 迅雷
+    pub pass_code_token: String,
+    // 139
+    pub account: String,
+    pub authorization: String,
+    // 分页游标（123 / 迅雷）
+    pub last_dir: String,
+    pub next_cursor: String,
+    pub next_page_token: String,
+}
+
+impl ResolveSession {
+    fn new(platform: Platform, share_id: String, pwd: String) -> Self {
+        Self {
+            platform,
+            share_id,
+            pwd,
+            title: String::new(),
+            stoken: String::new(),
+            sekey: String::new(),
+            baidu_share_id: String::new(),
+            baidu_uk: String::new(),
+            pass_code_token: String::new(),
+            account: String::new(),
+            authorization: String::new(),
+            last_dir: String::new(),
+            next_cursor: String::new(),
+            next_page_token: String::new(),
+        }
+    }
+}
+
+/// 会话表容量上限（超出淘汰最旧）
+const MAX_SESSIONS: usize = 32;
+
+fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
+    let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+    match accounts::load(&conn, platform)? {
+        Some(acc) if !acc.cookie().is_empty() => Ok(acc.cookie().to_string()),
+        _ => Err(AppError::Api(need_login_msg.to_string())),
+    }
+}
+
+fn insert_session(state: &AppState, session: ResolveSession) -> String {
+    let key = Uuid::new_v4().to_string();
+    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    // 容量控制：超过上限移除最早插入的会话
+    if sessions.len() >= MAX_SESSIONS {
+        if let Some(oldest) = sessions.keys().next().cloned() {
+            sessions.remove(&oldest);
+        }
+    }
+    sessions.insert(key.clone(), session);
+    key
+}
+
+fn get_session(state: &AppState, key: &str) -> AppResult<ResolveSession> {
+    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    sessions
+        .get(key)
+        .cloned()
+        .ok_or_else(|| AppError::Api("解析会话已过期，请重新解析".into()))
+}
+
+fn update_session(state: &AppState, key: &str, session: ResolveSession) {
+    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    sessions.insert(key.to_string(), session);
+}
+
+/// 持久化更新平台 Cookie（__puus 刷新后）
+fn persist_cookie(state: &AppState, platform: Platform, cookie: &str, nickname: &str) {
+    let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = accounts::save(
+        &conn,
+        &Account::Cookie { platform, cookie: cookie.to_string(), nickname: nickname.to_string() },
+        now,
+    );
+}
+
+/// 夸克转存取链路线（他人分享）：
+/// 临时目录 → 唯一子目录 tr_*（去重键每次不同，根治二次转存 404 code:21001）
+/// → 转存 → 轮询 → 取链；返回 (url, size, 子目录 fid)（下载完成后删整个子目录）。
+/// 自己的分享会因服务端拒绝转存抛错，由调用方走直取路线。
+async fn quark_transfer_route(
+    state: &AppState,
+    session: &ResolveSession,
+    cookie: &str,
+    file: &ShareFile,
+) -> AppResult<(String, i64, String)> {
+    let base_dir = quark::ensure_temp_dir(&state.http, cookie).await?;
+    let sub_dir = quark::create_transfer_subdir(&state.http, &base_dir, cookie).await?;
+    let task_id = quark::save_share_file(
+        &state.http, &session.share_id, &session.stoken, &file.pdir_fid, &file.fid, &file.fid_token, &sub_dir, cookie,
+    )
+    .await?;
+    let new_fid = quark::poll_task(&state.http, &task_id, cookie).await?;
+    let (url, _, size) = quark::get_download_link(&state.http, &new_fid, cookie).await?;
+    Ok((url, size, sub_dir))
+}
+
+// ---------- 解析入口（建会话 + 首页列表） ----------
+
+pub async fn resolve_share(state: &AppState, text: &str) -> AppResult<ResolveSessionInfo> {
+    let parsed = match crate::parser::parse(text) {
+        Ok(p) => p,
+        Err(e) => {
+            state.log(crate::logger::ERROR, "", "resolve", "解析失败：未识别到分享链接", &text.chars().take(200).collect::<String>());
+            return Err(e);
+        }
+    };
+    let platform = Platform::from_key(&parsed.platform)
+        .ok_or_else(|| AppError::Api("未知平台".into()))?;
+    state.log(
+        crate::logger::INFO,
+        platform.key(),
+        "resolve",
+        "开始解析分享链接",
+        &format!("share_id={} pwd={}", parsed.share_id, if parsed.pwd.is_empty() { "-" } else { &parsed.pwd }),
+    );
+    let mut session = ResolveSession::new(platform, parsed.share_id.clone(), parsed.pwd.clone());
+    let (files, title) = match build_session(state, platform, &parsed, &mut session).await {
+        Ok(v) => v,
+        Err(e) => {
+            state.log(crate::logger::ERROR, platform.key(), "resolve", &format!("解析失败：{e}"), "");
+            return Err(e);
+        }
+    };
+    session.title = title.clone();
+    let has_more = files.len() >= page_size(platform);
+    let key = insert_session(state, session);
+    state.log(
+        crate::logger::SUCCESS,
+        platform.key(),
+        "resolve",
+        &format!("解析成功：{}", if title.is_empty() { "（无标题）" } else { &title }),
+        &format!("首页 {} 个条目（会话 {}）", files.len(), &key[..8]),
+    );
+    Ok(ResolveSessionInfo {
+        session_key: key,
+        platform: parsed.platform,
+        title,
+        files,
+        has_more,
+    })
+}
+
+/// 各平台建会话取首页（原 resolve_share 主体）
+async fn build_session(
+    state: &AppState,
+    platform: Platform,
+    parsed: &crate::models::ParsedShare,
+    session: &mut ResolveSession,
+) -> AppResult<(Vec<ShareFile>, String)> {
+    let (files, title) = match platform {
+        Platform::Quark => {
+            let cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            let (stoken, title) = quark::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
+            session.stoken = stoken;
+            let (files, _) = quark::get_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
+            (files, title)
+        }
+        Platform::Uc => {
+            let cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
+            let (stoken, title) = uc::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
+            session.stoken = stoken;
+            let files = uc::get_transfer_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
+            (files, title)
+        }
+        Platform::Baidu => {
+            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
+            let sekey = baidu::verify_share(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
+            session.sekey = sekey;
+            let list = baidu::list_share(&state.http, &parsed.share_id, &session.sekey, "/", &cookie, 1).await?;
+            session.baidu_share_id = list.share_id.clone();
+            session.baidu_uk = list.uk.clone();
+            (list.files, list.title)
+        }
+        Platform::C139 => {
+            // 139 官方会明文回吐提取码，自动填充
+            if session.pwd.is_empty() {
+                if let Ok(pwd) = c139::get_out_link_password(&state.http, &parsed.share_id).await {
+                    session.pwd = pwd;
+                }
+            }
+            let title = c139::get_out_link_title(&state.http, &parsed.share_id).await?;
+            let files = c139::get_share_files(&state.http, &parsed.share_id, "root", &session.pwd, 1, 200).await?;
+            // 登录态预取（下载需要）
+            if let Ok(cookie) = load_account_cookie(state, platform, "") {
+                if let Some(auth) = c139::extract_authorization(&cookie) {
+                    session.authorization = auth;
+                    session.account = c139::extract_account_full(&cookie).unwrap_or_default();
+                }
+            }
+            (files, title)
+        }
+        Platform::Pan123 => {
+            let (files, next) = pan123::get_share_files(&state.http, &parsed.share_id, &session.pwd, "0", "", 1).await?;
+            session.next_cursor = next.clone().unwrap_or_default();
+            session.last_dir = "0".to_string();
+            (files, String::new())
+        }
+        Platform::Xunlei => {
+            state.load_xunlei_runtime()?;
+            // 克隆运行时（MutexGuard 不跨 await），完成后写回
+            let mut rt = {
+                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
+                if guard.access_token.is_empty() {
+                    return Err(AppError::Api("请先登录迅雷网盘".into()));
+                }
+                guard.clone()
+            };
+            let (title, files, pass_code_token, next) =
+                xunlei::get_share(&state.http, &mut rt, &parsed.share_id, &parsed.pwd, "").await?;
+            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+            state.persist_xunlei_runtime("")?;
+            session.pass_code_token = pass_code_token;
+            session.next_page_token = next;
+            (files, title)
+        }
+    };
+    session.title = title.clone();
+    Ok((files, title))
+}
+
+fn page_size(platform: Platform) -> usize {
+    match platform {
+        Platform::C139 => 200,
+        _ => 100,
+    }
+}
+
+// ---------- 文件列表（目录导航 / 翻页） ----------
+
+pub async fn list_share_files(
+    state: &AppState,
+    session_key: &str,
+    dir_id: &str,
+    page: i64,
+) -> AppResult<ShareFilePage> {
+    let mut session = get_session(state, session_key)?;
+    let platform = session.platform;
+    let dir_changed = session.last_dir != dir_id;
+    let (files, has_more) = match platform {
+        Platform::Quark => {
+            let cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            let (files, _) = quark::get_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
+            let has_more = files.len() >= 100;
+            (files, has_more)
+        }
+        Platform::Uc => {
+            let cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
+            let files = uc::get_transfer_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
+            let has_more = files.len() >= 100;
+            (files, has_more)
+        }
+        Platform::Baidu => {
+            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
+            let list = baidu::list_share(&state.http, &session.share_id, &session.sekey, dir_id, &cookie, page).await?;
+            (list.files, list.has_more)
+        }
+        Platform::C139 => {
+            let begin = (page - 1).max(0) * 200 + 1;
+            let end = page * 200;
+            let files = c139::get_share_files(&state.http, &session.share_id, dir_id, &session.pwd, begin, end).await?;
+            let has_more = files.len() >= 200;
+            (files, has_more)
+        }
+        Platform::Pan123 => {
+            // 目录切换 → 重置游标；翻页 → 用会话游标
+            let next = if dir_changed || page <= 1 { String::new() } else { session.next_cursor.clone() };
+            let (files, next_cursor) = pan123::get_share_files(&state.http, &session.share_id, &session.pwd, dir_id, &next, 1).await?;
+            session.next_cursor = next_cursor.clone().unwrap_or_default();
+            let has_more = next_cursor.is_some();
+            (files, has_more)
+        }
+        Platform::Xunlei => {
+            let token = if dir_changed || page <= 1 { String::new() } else { session.next_page_token.clone() };
+            let mut rt = {
+                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
+                guard.clone()
+            };
+            let (files, next) = xunlei::get_share_detail(&state.http, &mut rt, &session.share_id, dir_id, &session.pass_code_token, &token).await?;
+            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+            session.next_page_token = next;
+            let has_more = files.len() >= 100;
+            (files, has_more)
+        }
+    };
+    session.last_dir = dir_id.to_string();
+    update_session(state, session_key, session);
+    Ok(ShareFilePage { files, has_more })
+}
+
+// ---------- 递归收集目录下全部文件（文件夹下载用） ----------
+
+pub async fn collect_folder_files(
+    state: &AppState,
+    session_key: &str,
+    dir_id: &str,
+) -> AppResult<Vec<ShareFile>> {
+    let mut all = Vec::new();
+    let mut page = 1i64;
+    loop {
+        let page_result = list_share_files(state, session_key, dir_id, page).await?;
+        let has_more = page_result.has_more;
+        for f in page_result.files {
+            if f.isdir {
+                let sub = Box::pin(collect_folder_files(state, session_key, &f.fid)).await?;
+                all.extend(sub);
+            } else {
+                all.push(f);
+            }
+        }
+        if !has_more || page > 20 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
+}
+
+// ---------- 取下载直链 ----------
+
+pub async fn get_download_link(
+    state: &AppState,
+    session_key: &str,
+    file: &ShareFile,
+) -> AppResult<DownloadLink> {
+    let session = get_session(state, session_key)?;
+    let platform = session.platform;
+    let share_id = session.share_id.clone();
+    match platform {
+        Platform::Quark => {
+            let mut cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            // 取链前刷新 __puus（修复 AlistGo/alist#830 下载 412）
+            if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
+                if refreshed != cookie {
+                    persist_cookie(state, platform, &refreshed, "");
+                    cookie = refreshed;
+                }
+            }
+            // ① 转存路线（他人分享）：唯一子目录 tr_*（去重键每次不同，根治二次转存 404）
+            //    → 转存 → 轮询 → 取链 → cleanup = 子目录 fid（下载完成后删整个子目录）
+            // ② 直取路线（自己的分享，服务端拒绝转存自己的分享）：直接用分享 fid 取链
+            let (url, size, cleanup_id) = match quark_transfer_route(state, &session, &cookie, file).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("禁止转存自己的分享") {
+                        state.log(crate::logger::INFO, "quark", "link", "自己的分享，跳过转存直接取链", &file.fname);
+                        let (url, _, size) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
+                        (url, size, String::new())
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: if file.fsize > 0 { file.fsize } else { size },
+                headers: vec![
+                    ("Cookie".into(), cookie),
+                    ("User-Agent".into(), quark::UA.into()),
+                    ("Referer".into(), quark::DOWNLOAD_REFERER.into()),
+                ],
+                platform: platform.key().to_string(),
+                cleanup_id,
+            })
+        }
+        Platform::Uc => {
+            let mut cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
+            if let Ok(refreshed) = uc::refresh_session(&state.http, &cookie).await {
+                if refreshed != cookie {
+                    persist_cookie(state, platform, &refreshed, "");
+                    cookie = refreshed;
+                }
+            }
+            let (url, _, size) = uc::get_share_download_link(
+                &state.http, &file.fid, &file.fid_token, &session.stoken, &share_id, &cookie,
+            )
+            .await?;
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: if file.fsize > 0 { file.fsize } else { size },
+                headers: vec![
+                    ("Cookie".into(), cookie),
+                    ("User-Agent".into(), uc::UA.into()),
+                    ("Referer".into(), uc::DOWNLOAD_REFERER.into()),
+                ],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
+        Platform::Baidu => {
+            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
+            let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
+            let (_new_fs_id, new_path) = baidu::transfer(
+                &state.http, &session.baidu_share_id, &session.baidu_uk, &session.sekey, &file.fid, &temp_dir, &cookie,
+            )
+            .await?;
+            let url = baidu::locate_download(&state.http, &new_path, &cookie).await?;
+            // 取链后即时清理（locatedownload 直链自带 sign/expires，删除不影响）
+            let _ = baidu::delete_file(&state.http, &new_path, &cookie).await;
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: file.fsize,
+                headers: vec![
+                    ("Cookie".into(), cookie),
+                    ("User-Agent".into(), baidu::UA_NETDISK.into()),
+                ],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
+        Platform::C139 => {
+            let (url, _, size) = c139::get_share_download_link(
+                &state.http, &file.fid, &share_id, &session.account, Some(&session.authorization),
+            )
+            .await?;
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: if file.fsize > 0 { file.fsize } else { size },
+                headers: vec![("User-Agent".into(), c139::SHARE_MOBILE_UA.to_string())],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
+        Platform::Pan123 => {
+            let token = {
+                let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+                match accounts::load(&conn, platform)? {
+                    Some(Account::Pan123 { access_token, .. }) if !access_token.is_empty() => access_token,
+                    _ => return Err(AppError::Api("请先登录 123 云盘".into())),
+                }
+            };
+            let (url, _, size) = pan123::get_share_download_link(&state.http, &share_id, file, &token).await?;
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: if file.fsize > 0 { file.fsize } else { size },
+                headers: vec![
+                    ("User-Agent".into(), pan123::DART_UA.into()),
+                    ("Referer".into(), pan123::DOWNLOAD_REFERER.into()),
+                ],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
+        Platform::Xunlei => {
+            state.load_xunlei_runtime()?;
+            let mut rt = {
+                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
+                if guard.access_token.is_empty() {
+                    return Err(AppError::Api("请先登录迅雷网盘".into()));
+                }
+                guard.clone()
+            };
+            let temp_dir = xunlei::ensure_temp_dir(&state.http, &mut rt).await?;
+            let new_id = xunlei::restore(
+                &state.http, &mut rt, &share_id, &session.pass_code_token, &temp_dir, &[file.fid.clone()],
+            )
+            .await?;
+            let (url, _, size) = xunlei::get_file_detail(&state.http, &mut rt, &new_id).await?;
+            // 取链后即时清理（直链自带签名，删除不影响下载）
+            let _ = xunlei::batch_delete(&state.http, &mut rt, &[new_id]).await;
+            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: if file.fsize > 0 { file.fsize } else { size },
+                headers: vec![("User-Agent".into(), xunlei::WEB_UA.into())],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
+    }
+}
+
+/// 夸克延迟清理（下载完成后调用；由 aria2 完成回调触发）
+pub async fn cleanup_quark(state: &AppState, cleanup_id: &str) {
+    if cleanup_id.is_empty() {
+        return;
+    }
+    if let Ok(cookie) = load_account_cookie(state, Platform::Quark, "") {
+        let _ = quark::delete_file(&state.http, cleanup_id, &cookie).await;
+    }
+}

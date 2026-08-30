@@ -1,0 +1,40 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust / Tauri build artifacts（不提交脚手架生成物与编译产物）
+/src-tauri/target/
+/src-tauri/gen/schemas/
+/src-tauri/gen/android/
+*.pdb
+
+# 本地打包/调试日志
+build-log.txt
+
+# 测试 / 临时产物（不上传）
+/src-tauri/src/live_tests.rs
+/aria2-test-err.txt
+/aria2-test-out.txt
+/err2.txt
+/out2.txt

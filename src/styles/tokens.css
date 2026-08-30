@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+/* 深色模式：class 策略（useTheme 切换 html.dark） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* ── 暖色编辑风调色板（与 anthropic-art 插画同语言：单一 clay 强调家族）── */
+  --color-ivory: #faf9f5; /* 页面底 */
+  --color-carrier: #f0eee6; /* 一级承载面（卡片） */
+  --color-carrier-deep: #e8e6dc; /* 二级承载面（输入框 / 嵌套面板） */
+  --color-oat: #e3dacc; /* 侧栏底 / 选中态底 */
+  --color-ink: #141413; /* 主文字 / 线条 */
+  --color-ink-soft: #55524a; /* 次级文字 */
+  --color-clay: #d97757; /* 主强调：按钮 / 选中 / 进度 */
+  --color-clay-deep: #c05f41; /* hover / 按下 */
+  --color-cactus: #bcd1ca; /* 点缀：成功 / 在线 */
+
+  /* ── 字体：衬线 display + 系统中文正文 + mono 数字 ── */
+  --font-display: "Fraunces Variable", "Microsoft YaHei UI", serif;
+  --font-body: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", monospace;
+
+  /* ── 圆角 ── */
+  --radius-card: 12px;
+  --radius-ctrl: 8px;
+
+  /* ── 动效（克制的编辑风：入场 + 上浮，无循环动效） ── */
+  --animate-page-in: page-in 240ms ease-out both;
+  --animate-rise: rise 360ms ease-out both;
+  --animate-drop: drop 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+
+  /* ── 顶部悬浮胶囊投影 ── */
+  --shadow-capsule: 0 8px 28px rgba(20, 20, 19, 0.08);
+}
+
+/* 暖墨深色：象牙 ↔ 墨色互换，clay 家族保持 */
+.dark {
+  --color-ivory: #1f1e1b;
+  --color-carrier: #2a2824;
+  --color-carrier-deep: #333029;
+  --color-oat: #26241f;
+  --color-ink: #faf9f5;
+  --color-ink-soft: #a8a29a;
+  --color-clay-deep: #e08a6b;
+  --color-cactus: #7fa393;
+  --shadow-capsule: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+@keyframes drop {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--color-ivory);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background-color: var(--color-clay);
+    color: var(--color-ivory);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-carrier-deep);
+    border-radius: 999px;
+    border: 2px solid var(--color-ivory);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
