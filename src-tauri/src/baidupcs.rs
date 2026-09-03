@@ -105,6 +105,7 @@ async fn pick_best_url(client: &Client, urls: &[String]) -> Option<String> {
     let is_origin_node = |u: &str| {
         u.contains("bdd0.baidupcs.com")
             || u.contains("xad0.baidupcs.com")
+            || u.contains("yqd0.baidupcs.com")
             || u.contains("gzdd.baidupcs.com")
             || u.contains("shdd.baidupcs.com")
             || u.contains("njdd.baidupcs.com")

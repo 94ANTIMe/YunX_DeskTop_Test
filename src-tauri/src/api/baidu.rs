@@ -26,7 +26,11 @@ fn id_or(v: &Value, key: &str) -> String {
 }
 
 fn i64_or(v: &Value, key: &str) -> i64 {
-    v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
+    match v.get(key) {
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+        Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn check_errno(v: &Value, fallback: &str) -> AppResult<()> {
@@ -70,7 +74,7 @@ pub fn is_valid_cookie(cookie: &str) -> bool {
 }
 
 /// bdstoken（transfer/create 用）
-async fn get_bdstoken(client: &Client, cookie: &str) -> AppResult<String> {
+pub(crate) async fn get_bdstoken(client: &Client, cookie: &str) -> AppResult<String> {
     let url = format!(
         "{ACCOUNT_INFO_URL}?clienttype=0&app_id={APP_ID}&web=1&fields={}",
         urlencoding::encode(r#"["bdstoken"]"#)

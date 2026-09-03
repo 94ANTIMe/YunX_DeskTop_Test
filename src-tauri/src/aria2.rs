@@ -15,27 +15,77 @@ use crate::state::AppState;
 
 const RPC_PORT: u16 = 16800;
 
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// 持久化读取/写入本地 RPC 密钥，保持多次重启或热重载间密钥绝对一致
 fn rpc_secret() -> &'static str {
     static SECRET: OnceLock<String> = OnceLock::new();
-    SECRET.get_or_init(|| crate::api::random_alnum(24))
+    SECRET.get_or_init(|| {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let dir = std::path::PathBuf::from(appdata).join("com.yunx.desktop");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("aria2_secret.txt");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let trimmed = s.trim();
+                if trimmed.len() >= 16 {
+                    return trimmed.to_string();
+                }
+            }
+            let sec = crate::api::random_alnum(24);
+            let _ = std::fs::write(&path, &sec);
+            return sec;
+        }
+        crate::api::random_alnum(24)
+    })
 }
 
 fn rpc_url() -> String {
     format!("http://127.0.0.1:{RPC_PORT}/jsonrpc")
 }
 
-/// aria2 任务快照（tellStatus 关键字段）
-#[derive(Debug, Clone, Default)]
-struct TaskStatus {
-    status: String,       // active/waiting/paused/error/complete/removed
-    total: i64,
-    completed: i64,
-    speed: i64,
-    error_msg: String,
-    files: Vec<String>,   // 实际落盘路径
+/// 定向查杀 16800 端口上遗留的旧 aria2c 孤儿进程（仅针对 aria2c.exe，防端口冲突与 Unauthorized）
+#[cfg(windows)]
+fn kill_stale_aria2_on_port(port: u16) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = std::process::Command::new("cmd")
+        .args(["/c", &format!("netstat -ano -p tcp | findstr /R /C:\":{port} .*LISTENING\"")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(pid_str) = parts.last() {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    if pid != 0 && pid != std::process::id() {
+                        let check = std::process::Command::new("cmd")
+                            .args(["/c", &format!("tasklist /FI \"PID eq {pid}\" /FO CSV /NH")])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output();
+                        if let Ok(chk) = check {
+                            let chk_str = String::from_utf8_lossy(&chk.stdout);
+                            if chk_str.to_lowercase().contains("aria2c") {
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/F", "/PID", &pid.to_string()])
+                                    .creation_flags(CREATE_NO_WINDOW)
+                                    .output();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
-async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
+#[cfg(not(windows))]
+fn kill_stale_aria2_on_port(_port: u16) {}
+
+/// 底层单次 JSON-RPC 调用
+async fn rpc_call_raw(method: &str, params: Vec<Value>) -> AppResult<Value> {
     let http = reqwest::Client::new();
     // aria2 JSON-RPC：params 数组首元素为 "token:<secret>"，其后为实际参数
     let mut all_params: Vec<Value> = vec![json!(format!("token:{}", rpc_secret()))];
@@ -59,6 +109,36 @@ async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
         return Err(AppError::Api(format!("下载引擎: {msg}")));
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// 发起 JSON-RPC 请求，带 Unauthorized 自愈机制：若捕获到旧实例密钥冲突，自动清理端口冲突进程并拉起新引擎重试
+async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
+    match rpc_call_raw(method, params.clone()).await {
+        Ok(v) => Ok(v),
+        Err(AppError::Api(msg)) if msg.contains("Unauthorized") => {
+            if let Some(app) = APP_HANDLE.get() {
+                engine_log(app, "rpc_call: 遇到 Unauthorized 鉴权失败，触发下载引擎自愈机制");
+                kill_stale_aria2_on_port(RPC_PORT);
+                if spawn_sidecar(app).await {
+                    engine_log(app, "rpc_call: 引擎自愈重拉成功，重试原 RPC 请求");
+                    return rpc_call_raw(method, params).await;
+                }
+            }
+            Err(AppError::Api(msg))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// aria2 任务快照（tellStatus 关键字段）
+#[derive(Debug, Clone, Default)]
+struct TaskStatus {
+    status: String,       // active/waiting/paused/error/complete/removed
+    total: i64,
+    completed: i64,
+    speed: i64,
+    error_msg: String,
+    files: Vec<String>,   // 实际落盘路径
 }
 
 /// aria2 状态 → 任务状态常量
@@ -109,19 +189,17 @@ fn engine_log(app: &AppHandle, msg: &str) {
     }
 }
 
-/// 启动 aria2 进程并进入轮询循环（setup 时调用一次）
-pub async fn start(app: AppHandle) {
-    engine_log(&app, "start: 引擎启动流程开始");
+/// 拉起 aria2 sidecar 并等待 RPC 就绪
+async fn spawn_sidecar(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     let settings = state.load_settings();
-    let download_dir = resolve_download_dir(&app, &settings);
-    engine_log(&app, &format!("start: 下载目录 {}", download_dir.display()));
+    let download_dir = resolve_download_dir(app, &settings);
+    engine_log(app, &format!("spawn_sidecar: 下载目录 {}", download_dir.display()));
 
-    // 启动 sidecar 进程
     let shell = app.shell();
     match shell.sidecar("aria2c") {
         Ok(cmd) => {
-            engine_log(&app, "start: sidecar 已解析，准备 spawn");
+            engine_log(app, "spawn_sidecar: sidecar 已解析，准备 spawn");
             let mut args = vec![
                 "--enable-rpc".to_string(),
                 format!("--rpc-listen-port={RPC_PORT}"),
@@ -141,17 +219,15 @@ pub async fn start(app: AppHandle) {
                 "--console-log-level=warn".to_string(),
                 format!("--stop-with-process={}", std::process::id()),
             ];
-            // 代理注入（设置开启且填写完整时；aria2 全局代理影响所有连接）
             if proxy_configured(&settings) {
                 let proxy = build_proxy_arg(&settings);
                 args.push(format!("--all-proxy={proxy}"));
-                engine_log(&app, &format!("start: 已注入代理 --all-proxy={proxy}"));
+                engine_log(app, &format!("spawn_sidecar: 已注入代理 --all-proxy={proxy}"));
             }
             let cmd = cmd.args(args);
             match cmd.spawn() {
                 Ok((mut rx, _child)) => {
-                    engine_log(&app, "start: aria2 进程已 spawn");
-                    // 捕获 aria2 输出（stderr 诊断 → engine.log）
+                    engine_log(app, "spawn_sidecar: aria2 进程已 spawn");
                     let app_log = app.clone();
                     tauri::async_runtime::spawn(async move {
                         while let Some(evt) = rx.recv().await {
@@ -161,24 +237,41 @@ pub async fn start(app: AppHandle) {
                         }
                     });
                 }
-                Err(e) => engine_log(&app, &format!("start: aria2 spawn 失败 {e:?}")),
+                Err(e) => engine_log(app, &format!("spawn_sidecar: aria2 spawn 失败 {e:?}")),
             }
         }
-        Err(e) => engine_log(&app, &format!("start: sidecar 解析失败 {e:?}")),
+        Err(e) => engine_log(app, &format!("spawn_sidecar: sidecar 解析失败 {e:?}")),
     }
 
-    // 等待 RPC 就绪
     let mut ready = false;
-    let mut attempts = 0;
-    for i in 0..30 {
-        attempts = i + 1;
-        if rpc_call("aria2.getVersion", vec![]).await.is_ok() {
+    for _ in 0..30 {
+        if rpc_call_raw("aria2.getVersion", vec![]).await.is_ok() {
             ready = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    engine_log(&app, &format!("start: RPC 就绪={ready}（尝试 {attempts} 轮）"));
+    ready
+}
+
+/// 启动 aria2 进程并进入轮询循环（setup 时调用一次）
+pub async fn start(app: AppHandle) {
+    let _ = APP_HANDLE.set(app.clone());
+    engine_log(&app, "start: 引擎启动流程开始");
+
+    // 1. 先探测已有端口实例是否正常就绪
+    let mut healthy = false;
+    if rpc_call_raw("aria2.getVersion", vec![]).await.is_ok() {
+        engine_log(&app, "start: 现有 aria2 引擎已就绪且鉴权通过，直接复用");
+        healthy = true;
+    }
+
+    // 2. 若不可用或端口冲突，定向查杀 16800 上的旧 aria2c 进程并重新拉起
+    if !healthy {
+        kill_stale_aria2_on_port(RPC_PORT);
+        let ready = spawn_sidecar(&app).await;
+        engine_log(&app, &format!("start: 新引擎启动 就绪={ready}"));
+    }
 
     // 恢复未完成任务（aria2 重启后 gid 失效，重新入队续传）
     resume_pending_tasks(&app).await;
