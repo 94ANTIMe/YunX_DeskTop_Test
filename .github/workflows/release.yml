@@ -49,19 +49,24 @@ jobs:
 
       # ---------- 代码签名（可选）：配置了 WINDOWS_CERTIFICATE 才执行 ----------
       - name: 导入签名证书到用户证书库
-        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        if: env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         shell: pwsh
         run: |
           $pfx = Join-Path $env:RUNNER_TEMP "code-sign.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String(${{ secrets.WINDOWS_CERTIFICATE }}))
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $cert = Get-PfxCertificate -FilePath $pfx
           $thumb = $cert.Thumbprint
           echo "THUMBPRINT=$thumb" >> $env:GITHUB_ENV
-          CertUtil -user -importPFX $pfx proPwd:${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }} > $null
+          CertUtil -user -importPFX $pfx proPwd:$env:WINDOWS_CERTIFICATE_PASSWORD > $null
           Write-Host "证书已导入: $thumb"
 
       - name: 注入签名配置（存在证书时）
-        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        if: env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
         shell: pwsh
         run: |
           $confPath = "src-tauri/tauri.conf.json"
@@ -135,7 +140,7 @@ jobs:
 
       # ---------- GitCode Release（OpenAPI v5）----------
       - name: 发布 GitCode Release
-        if: ${{ secrets.GITCODE_TOKEN != '' }}
+        if: env.TOKEN != ''
         shell: bash
         env:
           TOKEN: ${{ secrets.GITCODE_TOKEN }}
