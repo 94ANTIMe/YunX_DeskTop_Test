@@ -2,6 +2,7 @@
 //! 服务端唯一门槛是解析码（3-6 个汉字，1-4 天更换）；本模块负责：
 //! ① 列目录 / 取下载直链 API 调用；
 //! ② 解析码自动刷新：下载更新包 → 解压提取 → 解析「最新密码：X」→ 持久化到 settings.json。
+#![allow(dead_code)]
 use std::io::Write;
 use std::path::Path;
 
@@ -42,6 +43,87 @@ pub fn is_password_error(e: &AppError) -> bool {
 
 // ---------- API ----------
 
+/// 服务检测结果（设置页「测试连接」使用）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccelCheckResult {
+    pub reachable: bool,
+    pub latency_ms: u64,
+    pub status: String, // "ok" | "invalid_key" | "warn" | "error"
+    pub message: String,
+}
+
+/// 测试加速服务端连通性与解析码有效性
+pub async fn check_service(
+    client: &Client,
+    base: &str,
+    password: &str,
+) -> AccelCheckResult {
+    let start = std::time::Instant::now();
+    let resp = client
+        .post(format!("{base}/api/share/list"))
+        .timeout(std::time::Duration::from_secs(5))
+        .json(&json!({
+            "url": "https://pan.baidu.com/s/1test",
+            "password": password,
+        }))
+        .send()
+        .await;
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    match resp {
+        Ok(r) => {
+            let status_code = r.status();
+            if let Ok(v) = r.json::<Value>().await {
+                let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("未知");
+                if code == 20016 || msg.contains("解析码") || msg.contains("密码") {
+                    AccelCheckResult {
+                        reachable: true,
+                        latency_ms,
+                        status: "invalid_key".to_string(),
+                        message: format!("服务已连通（{latency_ms}ms），但解析码错误或已失效：{msg}"),
+                    }
+                } else if code == 200 || code == 0 || msg.contains("分享") || msg.contains("surl") || msg.contains("不存在") {
+                    AccelCheckResult {
+                        reachable: true,
+                        latency_ms,
+                        status: "ok".to_string(),
+                        message: format!("服务连接正常（{latency_ms}ms），解析码验证通过！"),
+                    }
+                } else {
+                    AccelCheckResult {
+                        reachable: true,
+                        latency_ms,
+                        status: "warn".to_string(),
+                        message: format!("服务已连通（{latency_ms}ms），返回状态：{msg}"),
+                    }
+                }
+            } else {
+                AccelCheckResult {
+                    reachable: true,
+                    latency_ms,
+                    status: "ok".to_string(),
+                    message: format!("服务已连通（HTTP {status_code}，{latency_ms}ms）"),
+                }
+            }
+        }
+        Err(e) => {
+            AccelCheckResult {
+                reachable: false,
+                latency_ms,
+                status: "error".to_string(),
+                message: if e.is_timeout() {
+                    "连接超时（>5秒），服务端无响应".to_string()
+                } else {
+                    format!("无法连接到服务：{e}")
+                },
+            }
+        }
+    }
+}
+
 /// get_file_list 结果（randsk/uk/shareid 供后续 get_download_links 用）
 pub struct AccelListData {
     pub files: Vec<ShareFile>,
@@ -55,7 +137,7 @@ pub struct AccelListData {
 async fn post_api(client: &Client, base: &str, path: &str, body: Value) -> AppResult<Value> {
     let resp = client
         .post(format!("{base}{path}"))
-        .timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(4))
         .json(&body)
         .send()
         .await?;

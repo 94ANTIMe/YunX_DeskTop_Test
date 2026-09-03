@@ -11,9 +11,11 @@ import {
   History,
   Link2,
   Loader2,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
+import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
@@ -80,6 +82,8 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   /** 目录树：是否展示侧栏树 + 根节点 */
   const [showTree, setShowTree] = useState(false);
   const [treeRoot, setTreeRoot] = useState<TreeNode | null>(null);
+  const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const noticeTimer = useRef<number | undefined>(undefined);
 
   const showNotice = (msg: string) => {
@@ -87,6 +91,35 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     window.clearTimeout(noticeTimer.current);
     noticeTimer.current = window.setTimeout(() => setNotice(""), 4000);
   };
+
+  async function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    // 1. 检查是否有本地文件拖拽进来（如 .torrent 文件）
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file.name.toLowerCase().endsWith(".torrent")) {
+        try {
+          showNotice(`正在读取 BT 种子「${file.name}」…`);
+          const buf = await file.arrayBuffer();
+          const bytes = Array.from(new Uint8Array(buf));
+          await ipc.enqueueTorrent(bytes, file.name);
+          showNotice(`BT 种子已加入下载：${file.name}`);
+          onNavigate("download");
+          return;
+        } catch (err) {
+          setError(errMsg(err));
+          return;
+        }
+      }
+    }
+    // 2. 检查文本拖拽（链接或磁力）
+    const text = e.dataTransfer.getData("text/plain");
+    if (text && text.trim()) {
+      setInput(text.trim());
+      resolve(text.trim());
+    }
+  }
 
   // 解析（text 缺省取输入框内容；搜索页转入时传「链接 + 提取码」组合文本）
   async function resolve(text?: string) {
@@ -410,7 +443,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
 
   return (
     <div className="space-y-6">
-      <PageHeader tab="resolve" subtitle="粘贴网盘分享链接，自动识别平台与提取码">
+      <PageHeader tab="resolve" subtitle="粘贴网盘分享、Magnet 磁力或网络直链，自动识别平台并高速下载">
         <div className="flex items-center gap-2">
           <button
             onClick={bookmarkCurrent}
@@ -437,8 +470,24 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
         </div>
       </PageHeader>
 
-      {/* 输入区 */}
-      <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
+      {/* 输入区（支持拖拽 .torrent 种子与文本直链） */}
+      <section
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragging(true);
+        }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
+        className="relative animate-rise rounded-card bg-carrier p-6"
+        style={{ animationDelay: "60ms" }}
+      >
+        {isDragging && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center rounded-card border-2 border-dashed border-clay bg-carrier/95 backdrop-blur-sm animate-fade">
+            <ArrowDownToLine size={32} className="animate-bounce text-clay" />
+            <p className="mt-2 text-sm font-semibold text-ink">松开鼠标，立即解析或添加下载任务</p>
+            <p className="mt-1 text-xs text-ink-soft">支持 .torrent 种子文件、磁力链接或网络直链</p>
+          </div>
+        )}
         <div className="flex gap-4">
           {/* hero 插画（未解析时展示） */}
           {!session && (
@@ -453,7 +502,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             <textarea
               value={input}
               onChange={(e) => setInput(e.currentTarget.value)}
-              placeholder="粘贴分享链接或整段分享文案，如 https://pan.quark.cn/s/xxxxxxxx"
+              placeholder="粘贴网盘分享链接、Magnet 磁力链接（magnet:?xt=...）或网络直链，或直接拖拽 .torrent 种子文件进窗口"
               className="h-24 w-full resize-none rounded-ctrl border border-ink/10 bg-carrier-deep px-4 py-3 text-sm text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
             />
             <div className="mt-3 flex items-center gap-3">
@@ -471,7 +520,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                 {resolving ? <Loader2 size={15} className="animate-spin" /> : <Link2 size={15} />}
                 {resolving ? "解析中…" : "解析"}
               </button>
-              <span className="text-xs text-ink-soft/70">支持：夸克 / UC / 迅雷 / 百度 / 139 / 123</span>
+              <span className="text-xs text-ink-soft/70">支持：6 大网盘分享 / Magnet 磁力 / BT 种子 / 网页直链</span>
             </div>
           </div>
         </div>
@@ -590,6 +639,16 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                   <span className="shrink-0 font-mono text-xs text-ink-soft">
                     {file.isdir ? "文件夹" : formatBytes(file.fsize)}
                   </span>
+                  {!file.isdir && (
+                    <button
+                      onClick={() => setSearchModalFilename(file.fname)}
+                      className="flex shrink-0 items-center gap-1 rounded-ctrl border border-ink/15 px-2.5 py-1.5 text-xs text-ink-soft hover:border-clay hover:text-clay transition-colors"
+                      title="在夸克/UC/123等其他网盘搜同款不限速资源"
+                    >
+                      <Sparkles size={12} className="text-clay" />
+                      <span>搜同款</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => (file.isdir ? downloadFolder(file) : downloadFile(file))}
                     disabled={downloadingFid !== null || folderBusy !== null}
@@ -758,6 +817,19 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           </div>
         </div>
       )}
+
+      {/* 跨网盘搜同款弹窗 */}
+      <CrossDriveSearchModal
+        open={Boolean(searchModalFilename)}
+        filename={searchModalFilename || ""}
+        onClose={() => setSearchModalFilename(null)}
+        onResolveShare={(url, p) => {
+          setSearchModalFilename(null);
+          setInput(url);
+          setPwd(p || "");
+          resolve(p ? `${url} 提取码：${p}` : url);
+        }}
+      />
     </div>
   );
 }

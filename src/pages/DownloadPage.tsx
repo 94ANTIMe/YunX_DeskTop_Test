@@ -8,12 +8,14 @@ import {
   Loader2,
   Pause,
   Play,
+  Sparkles,
   Square,
   Trash2,
   XCircle,
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import EmptyState from "../components/EmptyState";
+import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import { errMsg, ipc, onDownloadsUpdated, type DownloadDetail, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatDate, formatRemain, formatSpeed, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
@@ -21,6 +23,7 @@ import emptyArt from "../assets/art/empty-downloads.jpg";
 
 interface DownloadPageProps {
   onNavigate: (tab: TabId) => void;
+  onGoResolve?: (url: string, pwd?: string) => void;
 }
 
 /** 任务状态语义 */
@@ -118,13 +121,13 @@ function Metric({ label, value, mono = true }: { label: string; value: string; m
 }
 
 /** 下载页：aria2 任务实时列表（事件驱动 + 全量兜底）+ 任务 Dashboard 详情 */
-export default function DownloadPage({ onNavigate }: DownloadPageProps) {
+export default function DownloadPage({ onNavigate, onGoResolve }: DownloadPageProps) {
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
-  const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<number | null>(null);
-  // Dashboard：展开的任务 id + 详情快照（连接数/上传速度/耗时/URL 等扩展字段）
+  const [error, setError] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
   const [detail, setDetail] = useState<DownloadDetail | null>(null);
+  const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
   // 速度采样历史（id → 最近 N 个速度点；事件驱动写入）
   const speedHistory = useRef<Map<number, number[]>>(new Map());
 
@@ -419,6 +422,15 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
                         className={`transition-transform ${open ? "rotate-180" : ""}`}
                       />
                     </button>
+                    {/* 跨网盘搜同款 */}
+                    <button
+                      onClick={() => setSearchModalFilename(task.fileName)}
+                      className="flex items-center gap-1 rounded-ctrl border border-ink/15 px-3 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay"
+                      title="在夸克/UC/123等不限速网盘搜同款资源"
+                    >
+                      <Sparkles size={12} className="text-clay" />
+                      搜同款
+                    </button>
                   </div>
                 </div>
 
@@ -459,6 +471,17 @@ export default function DownloadPage({ onNavigate }: DownloadPageProps) {
           })
         )}
       </div>
+
+      {/* 跨网盘搜同款弹窗 */}
+      <CrossDriveSearchModal
+        open={Boolean(searchModalFilename)}
+        filename={searchModalFilename || ""}
+        onClose={() => setSearchModalFilename(null)}
+        onResolveShare={(url, pwd) => {
+          setSearchModalFilename(null);
+          onGoResolve?.(url, pwd);
+        }}
+      />
     </div>
   );
 }

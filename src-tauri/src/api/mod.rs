@@ -5,6 +5,7 @@ pub mod pan123;
 pub mod pansou;
 pub mod quark;
 pub mod baidaccel;
+pub mod pan_files;
 pub mod uc;
 pub mod xunlei;
 

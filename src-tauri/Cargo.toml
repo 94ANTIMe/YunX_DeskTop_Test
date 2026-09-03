@@ -1,6 +1,6 @@
 [package]
 name = "yunx-desktop"
-version = "0.4.4"
+version = "0.4.5"
 description = "云析桌面版 — 网盘分享链接解析与高速下载"
 authors = ["YunX"]
 edition = "2021"

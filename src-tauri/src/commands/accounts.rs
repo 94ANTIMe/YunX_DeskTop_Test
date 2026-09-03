@@ -118,3 +118,27 @@ pub async fn xunlei_sms_login(
 pub async fn pan123_login(app: AppHandle, account: String, password: String) -> AppResult<String> {
     login::pan123_login(&app, &account, &password).await
 }
+
+/// 列出个人网盘某目录下的文件与文件夹
+#[tauri::command]
+pub async fn list_personal_files(
+    app: AppHandle,
+    platform: String,
+    dir_id: Option<String>,
+) -> AppResult<Vec<crate::models::ShareFile>> {
+    let state = app.state::<AppState>();
+    let plat = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
+    crate::api::pan_files::list_personal_files(&state, plat, dir_id.as_deref().unwrap_or("")).await
+}
+
+/// 获取个人网盘文件下载直链并入队
+#[tauri::command]
+pub async fn get_personal_download_link(
+    app: AppHandle,
+    platform: String,
+    file: crate::models::ShareFile,
+) -> AppResult<crate::models::DownloadLink> {
+    let state = app.state::<AppState>();
+    let plat = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
+    crate::api::pan_files::get_personal_download_link(&state, plat, &file).await
+}

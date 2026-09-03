@@ -34,3 +34,24 @@ pub async fn update_settings(app: AppHandle, settings: Settings) -> AppResult<()
     }
     Ok(())
 }
+
+/// 测试百度网盘第三方加速通道（连通性及解析码校验）
+#[tauri::command]
+pub async fn test_baidu_speed_service(
+    app: AppHandle,
+    base_url: Option<String>,
+    password: Option<String>,
+) -> AppResult<crate::api::baidaccel::AccelCheckResult> {
+    let state = app.state::<AppState>();
+    let settings = state.load_settings();
+    let base = base_url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| crate::api::baidaccel::base_url_of(&settings));
+    let pwd = password
+        .map(|p| p.trim().to_string())
+        .unwrap_or_else(|| settings.baidu_speed_password.trim().to_string());
+
+    let res = crate::api::baidaccel::check_service(&state.http, &base, &pwd).await;
+    Ok(res)
+}

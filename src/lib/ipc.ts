@@ -318,6 +318,11 @@ export const ipc = {
   getDownloadLink: (sessionKey: string, file: ShareFile) =>
     invoke<DownloadLink>("get_download_link", { sessionKey, file }),
 
+  listPersonalFiles: (platform: string, dirId?: string) =>
+    invoke<ShareFile[]>("list_personal_files", { platform, dirId }),
+  getPersonalDownloadLink: (platform: string, file: ShareFile) =>
+    invoke<DownloadLink>("get_personal_download_link", { platform, file }),
+
   enqueueDownload: (
     url: string,
     fileName: string,
@@ -334,6 +339,10 @@ export const ipc = {
       cleanupId,
       mirrors,
     }),
+  enqueueTorrent: (torrentData: number[], fileName: string) =>
+    invoke<number>("enqueue_torrent", { torrentData, fileName }),
+  enqueueTorrentFile: (filePath: string) =>
+    invoke<number>("enqueue_torrent_file", { filePath }),
   pauseDownload: (id: number) => invoke<void>("pause_download", { id }),
   resumeDownload: (id: number) => invoke<void>("resume_download", { id }),
   pauseAllDownloads: () => invoke<void>("pause_all_downloads"),
@@ -360,7 +369,20 @@ export const ipc = {
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   downloadUpdate: () => invoke<string>("download_update"),
   installUpdate: (path: string) => invoke<void>("install_update", { path }),
+
+  testBaiduSpeedService: (baseUrl?: string, password?: string) =>
+    invoke<BaiduSpeedCheckResult>("test_baidu_speed_service", {
+      baseUrl: baseUrl || null,
+      password: password || null,
+    }),
 };
+
+export interface BaiduSpeedCheckResult {
+  reachable: boolean;
+  latencyMs: number;
+  status: "ok" | "invalid_key" | "warn" | "error";
+  message: string;
+}
 
 // ---------- 事件订阅 ----------
 

@@ -27,6 +27,8 @@ export const PLATFORM_LABELS: Record<string, string> = {
   baidu: "百度",
   c139: "139",
   pan123: "123",
+  direct: "直链",
+  magnet: "磁力/BT",
 };
 
 export function platformLabel(platform: string): string {

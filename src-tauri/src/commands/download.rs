@@ -28,6 +28,28 @@ pub async fn enqueue_download(
     .await
 }
 
+/// 入队 BT 种子数据
+#[tauri::command]
+pub async fn enqueue_torrent(
+    app: AppHandle,
+    torrent_data: Vec<u8>,
+    file_name: String,
+) -> AppResult<i64> {
+    aria2::enqueue_torrent(&app, &torrent_data, &file_name).await
+}
+
+/// 入队本地 BT 种子文件路径
+#[tauri::command]
+pub async fn enqueue_torrent_file(
+    app: AppHandle,
+    file_path: String,
+) -> AppResult<i64> {
+    let path = std::path::Path::new(&file_path);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("download.torrent").to_string();
+    let bytes = tokio::fs::read(path).await.map_err(|e| crate::error::AppError::Api(format!("读取种子文件失败: {e}")))?;
+    aria2::enqueue_torrent(&app, &bytes, &name).await
+}
+
 /// 暂停全部（托盘菜单 / 前端）
 #[tauri::command]
 pub async fn pause_all_downloads(app: AppHandle) -> AppResult<()> {

@@ -160,6 +160,7 @@ fn is_captcha_blocked(e: &AppError) -> bool {
 }
 
 /// 验证码风控错误 → 明确指引；其余原样返回（供解析码刷新等链路使用）
+#[allow(dead_code)]
 pub(crate) fn captcha_hint(e: AppError, hint: &str) -> AppError {
     if is_captcha_blocked(&e) {
         AppError::Api(hint.to_string())
@@ -190,35 +191,18 @@ fn baidu_err_hint(e: AppError) -> AppError {
     }
 }
 
-/// 百度加速列目录：解析码失效（20016）自动刷新一次后重试
+/// 百度加速列目录：若密码不可用或接口超时，秒级快速失败并回退官方链路
 async fn accel_list(state: &AppState, surl: &str, pwd: &str, dir: &str) -> AppResult<baidaccel::AccelListData> {
     let settings = state.load_settings();
     let base = baidaccel::base_url_of(&settings);
-    let password = settings.baidu_speed_password;
-    if !password.is_empty() {
-        match baidaccel::get_file_list(&state.http, &base, surl, pwd, dir, &password).await {
-            Ok(v) => return Ok(v),
-            Err(e) if baidaccel::is_password_error(&e) => {
-                state.log(logger::INFO, "baidu", "accel", "解析码失效，尝试自动更新", "");
-            }
-            Err(e) => {
-                state.log(logger::ERROR, "baidu", "accel", "加速列目录失败", &e.to_string());
-                return Err(e);
-            }
-        }
+    let password = settings.baidu_speed_password.trim().to_string();
+    if password.is_empty() {
+        return Err(AppError::Api("加速通道解析码未配置，回退官方链路".into()));
     }
-    match baidaccel::refresh_password(state).await {
-        Ok(password) => {
-            match baidaccel::get_file_list(&state.http, &base, surl, pwd, dir, &password).await {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    state.log(logger::ERROR, "baidu", "accel", "自动更新解析码后列目录仍失败", &e.to_string());
-                    Err(e)
-                }
-            }
-        }
+    match baidaccel::get_file_list(&state.http, &base, surl, pwd, dir, &password).await {
+        Ok(v) => Ok(v),
         Err(e) => {
-            state.log(logger::ERROR, "baidu", "accel", "自动更新解析码失败", &e.to_string());
+            state.log(logger::INFO, "baidu", "accel", "加速通道不可用，快速回退官方链路", &e.to_string());
             Err(e)
         }
     }
@@ -401,27 +385,24 @@ async fn build_session(
             (files, title)
         }
         Platform::Baidu => {
-            // 高速通道开启时优先走加速路由，失败回退官方链路
-            let settings = state.load_settings();
-            if settings.baidu_speed_enabled {
-                match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
-                    Ok(data) => {
-                        session.accel = true;
-                        session.accel_randsk = data.randsk.clone();
-                        session.accel_uk = data.uk.clone();
-                        session.accel_shareid = data.shareid.clone();
-                        state.log(logger::INFO, "baidu", "accel", "百度高速通道已启用", "");
-                        return Ok((data.files, data.uname));
-                    }
-                    Err(e) => {
-                        state.log(
-                            logger::ERROR,
-                            "baidu",
-                            "accel",
-                            "加速通道不可用，回退官方链路",
-                            &e.to_string(),
-                        );
-                    }
+            // 自动静默优先探测高速通道，不可用时毫秒级无感回退官方多镜像并发链路
+            match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
+                Ok(data) => {
+                    session.accel = true;
+                    session.accel_randsk = data.randsk.clone();
+                    session.accel_uk = data.uk.clone();
+                    session.accel_shareid = data.shareid.clone();
+                    state.log(logger::INFO, "baidu", "accel", "百度高速通道已启用", "");
+                    return Ok((data.files, data.uname));
+                }
+                Err(e) => {
+                    state.log(
+                        logger::INFO,
+                        "baidu",
+                        "accel",
+                        "加速通道未就绪，自动切入官方多源并发链路",
+                        &e.to_string(),
+                    );
                 }
             }
             baidu_official_session(state, parsed, session).await?
@@ -467,6 +448,63 @@ async fn build_session(
             session.pass_code_token = pass_code_token;
             session.next_page_token = next;
             (files, title)
+        }
+        Platform::Direct => {
+            let url = parsed.share_id.clone();
+            let mut fname = url
+                .split('?')
+                .next()
+                .unwrap_or(&url)
+                .split('/')
+                .last()
+                .unwrap_or("download.bin")
+                .to_string();
+            if let Ok(decoded) = urlencoding::decode(&fname) {
+                fname = decoded.into_owned();
+            }
+            if fname.is_empty() {
+                fname = "download.bin".to_string();
+            }
+            let mut fsize = 0i64;
+            if let Ok(resp) = state.http.head(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+                if let Some(len) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
+                    if let Ok(s) = len.to_str() {
+                        fsize = s.parse::<i64>().unwrap_or(0);
+                    }
+                }
+            }
+            let file = ShareFile {
+                fid: "direct".into(),
+                fname: fname.clone(),
+                fsize,
+                isdir: false,
+                pdir_fid: "".into(),
+                fid_token: url.clone(),
+                modify_time: "".into(),
+            };
+            (vec![file], fname)
+        }
+        Platform::Magnet => {
+            let magnet = parsed.share_id.clone();
+            let fname = if let Some(dn_idx) = magnet.find("dn=") {
+                let after = &magnet[dn_idx + 3..];
+                let end = after.find('&').unwrap_or(after.len());
+                urlencoding::decode(&after[..end])
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| "Magnet_BT_Task".to_string())
+            } else {
+                "Magnet_BT_Task".to_string()
+            };
+            let file = ShareFile {
+                fid: "magnet".into(),
+                fname: fname.clone(),
+                fsize: 0,
+                isdir: false,
+                pdir_fid: "".into(),
+                fid_token: magnet.clone(),
+                modify_time: "".into(),
+            };
+            (vec![file], fname)
         }
     };
     session.title = title.clone();
@@ -544,6 +582,7 @@ pub async fn list_share_files(
             let has_more = files.len() >= 100;
             (files, has_more)
         }
+        Platform::Direct | Platform::Magnet => (Vec::new(), false),
     };
     session.last_dir = dir_id.to_string();
     update_session(state, session_key, session);
@@ -671,37 +710,21 @@ pub async fn get_download_link(
             } else {
                 let settings = state.load_settings();
                 let base = baidaccel::base_url_of(&settings);
-                let mut password = settings.baidu_speed_password;
-                if password.is_empty() {
-                    password = baidaccel::refresh_password(state).await?;
-                }
-                let link = match accel_fetch_link(state, &base, &session, file, &password).await {
-                    Ok(v) => v,
-                    Err(e) if baidaccel::is_password_error(&e) => {
-                        state.log(logger::INFO, "baidu", "accel", "解析码失效，取链自动更新", "");
-                        let password = baidaccel::refresh_password(state).await?;
-                        accel_fetch_link(state, &base, &session, file, &password).await?
-                    }
-                    Err(e) => {
-                        state.log(logger::ERROR, "baidu", "accel", "加速取链失败", &e.to_string());
-                        return Err(e);
-                    }
-                };
-                // 直链可达性探测；不可达 → 回退官方链路
-                match link_reachable(&state.http, &link.0, &link.1).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        state.log(logger::INFO, "baidu", "accel", "加速直链不可达，回退官方链路", &file.fname);
-                        let official = baidu_official_link(state, session_key, file).await?;
-                        return Ok(official);
-                    }
-                    Err(reason) => {
-                        state.log(logger::INFO, "baidu", "accel", "加速直链探测失败，回退官方链路", &format!("{} {}", file.fname, reason));
-                        let official = baidu_official_link(state, session_key, file).await?;
-                        return Ok(official);
+                let password = settings.baidu_speed_password.trim().to_string();
+                let mut accel_ok = None;
+                if !password.is_empty() {
+                    if let Ok(link) = accel_fetch_link(state, &base, &session, file, &password).await {
+                        if let Ok(true) = link_reachable(&state.http, &link.0, &link.1).await {
+                            accel_ok = Some(link);
+                        }
                     }
                 }
-                link
+                if let Some(link) = accel_ok {
+                    link
+                } else {
+                    state.log(logger::INFO, "baidu", "accel", "加速通道不可用，立即快速切入官方直连", &file.fname);
+                    return baidu_official_link(state, session_key, file).await;
+                }
             };
             state.log(logger::SUCCESS, "baidu", "accel", "取链成功", &file.fname);
             Ok(DownloadLink {
@@ -814,6 +837,32 @@ pub async fn get_download_link(
                 filename: file.fname.clone(),
                 size: if file.fsize > 0 { file.fsize } else { size },
                 headers: vec![("User-Agent".into(), xunlei::WEB_UA.into())],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+                mirrors: Vec::new(),
+            })
+        }
+        Platform::Direct => {
+            let url = if !file.fid_token.is_empty() { file.fid_token.clone() } else { session.share_id.clone() };
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: file.fsize,
+                headers: vec![
+                    ("User-Agent".into(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36".into()),
+                ],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+                mirrors: Vec::new(),
+            })
+        }
+        Platform::Magnet => {
+            let magnet = if !file.fid_token.is_empty() { file.fid_token.clone() } else { session.share_id.clone() };
+            Ok(DownloadLink {
+                url: magnet,
+                filename: file.fname.clone(),
+                size: file.fsize,
+                headers: Vec::new(),
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),

@@ -35,7 +35,23 @@ pub fn parse(text: &str) -> AppResult<ParsedShare> {
     });
 
     let trimmed = text.trim();
-    // 截掉常见中文标点 / 反引号尾部（对齐 Android trimEnd，兼容 markdown 包裹的链接）
+    // 1. 优先检测磁力链接（Magnet）
+    if let Some(pos) = trimmed.to_lowercase().find("magnet:?xt=urn:btih:") {
+        let after = &trimmed[pos..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>' || c == '`')
+            .unwrap_or(after.len());
+        let magnet_uri = after[..end]
+            .trim_end_matches(['。', '，', ',', '；', ';', ')', ']', '}', '"', '\'', '`', '>', '）'])
+            .to_string();
+        return Ok(ParsedShare {
+            platform: Platform::Magnet.key().to_string(),
+            share_id: magnet_uri,
+            pwd: String::new(),
+        });
+    }
+
+    // 2. 检测网络 URL（网盘分享或通用 HTTP 直链）
     let url = r
         .url
         .find(trimmed)
@@ -44,7 +60,7 @@ pub fn parse(text: &str) -> AppResult<ParsedShare> {
                 .trim_end_matches(['。', '，', ',', '；', ';', ')', ']', '}', '"', '\'', '`', '>', '）'])
                 .to_string()
         })
-        .ok_or_else(|| AppError::Unsupported("未识别到分享链接，请粘贴包含链接的文本".into()))?;
+        .ok_or_else(|| AppError::Unsupported("未识别到可下载链接，请粘贴网盘分享、Magnet 磁力或网络直链".into()))?;
 
     let pwd = r
         .pwd_in_url
@@ -81,9 +97,8 @@ pub fn parse(text: &str) -> AppResult<ParsedShare> {
     } else if let Some(sid) = try_match(&r.pan123_srr) {
         (Platform::Pan123, sid)
     } else {
-        return Err(AppError::Unsupported(
-            "暂不支持该链接（支持：夸克 / UC / 迅雷 / 百度 / 139 / 123）".into(),
-        ));
+        // 普通 HTTP/HTTPS 直链下载（通用下载）
+        (Platform::Direct, url.clone())
     };
 
     Ok(ParsedShare {

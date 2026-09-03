@@ -73,6 +73,7 @@ pub fn load(conn: &Connection, platform: Platform, active_key: &str) -> AppResul
         Platform::C139 => load_c139(conn, active_key)?,
         Platform::Xunlei => load_xunlei(conn, active_key)?,
         Platform::Pan123 => load_pan123(conn, active_key)?,
+        Platform::Direct | Platform::Magnet => return Ok(None),
     };
     // 记录更新时间（登录态刷新）；顺带把旧明文行加密迁移
     if let (Some(acc), Some(key)) = (&acc, &row_key(conn, platform, active_key)?) {
@@ -90,6 +91,7 @@ fn row_key(conn: &Connection, platform: Platform, active_key: &str) -> AppResult
         Platform::C139 => "c139_account",
         Platform::Xunlei => "xunlei_account",
         Platform::Pan123 => "pan123_account",
+        Platform::Direct | Platform::Magnet => return Ok(None),
     };
     if !active_key.is_empty() {
         let exists: Option<String> = conn
@@ -260,6 +262,7 @@ pub fn delete(conn: &Connection, platform: Platform, key: &str) -> AppResult<()>
         Platform::Baidu => "baidu_account",
         Platform::C139 => "c139_account",
         Platform::Pan123 => "pan123_account",
+        Platform::Direct | Platform::Magnet => return Ok(()),
     };
     conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![key])?;
     Ok(())
@@ -274,6 +277,7 @@ pub fn list_rows(conn: &Connection, platform: Platform, active_key: &str) -> App
         Platform::C139 => "c139_account",
         Platform::Xunlei => "xunlei_account",
         Platform::Pan123 => "pan123_account",
+        Platform::Direct | Platform::Magnet => return Ok(Vec::new()),
     };
     let cols = match platform {
         Platform::Xunlei => "id, nickname, updated_at",

@@ -15,6 +15,20 @@ use crate::state::AppState;
 
 const RPC_PORT: u16 = 16800;
 
+/// 全球活跃度最高的高速公共 BitTorrent Tracker 列表（定期自愈注入）
+pub const DEFAULT_BT_TRACKERS: &str = "\
+udp://tracker.opentrackr.org:1337/announce,\
+udp://open.demonii.com:1337/announce,\
+udp://open.stealth.si:80/announce,\
+udp://tracker.torrent.eu.org:451/announce,\
+udp://explodie.org:6969/announce,\
+udp://tracker.tiny-vps.com:6969/announce,\
+udp://p4p.arenabg.com:1337/announce,\
+udp://tracker.moeking.me:6969/announce,\
+https://tracker.tamersunion.org:443/announce,\
+http://tracker.dler.org:6969/announce,\
+udp://tracker.altrosky.nl:6969/announce";
+
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 /// 持久化读取/写入本地 RPC 密钥，保持多次重启或热重载间密钥绝对一致
@@ -217,6 +231,14 @@ async fn spawn_sidecar(app: &AppHandle) -> bool {
                 "--retry-wait=3".to_string(),
                 format!("--max-overall-download-limit={}", limit_str(settings.download_speed_limit)),
                 "--console-log-level=warn".to_string(),
+                "--enable-dht=true".to_string(),
+                "--enable-dht6=true".to_string(),
+                "--enable-peer-exchange=true".to_string(),
+                "--bt-enable-lpd=true".to_string(),
+                "--bt-max-peers=60".to_string(),
+                "--follow-torrent=mem".to_string(),
+                "--seed-time=0".to_string(),
+                format!("--bt-tracker={DEFAULT_BT_TRACKERS}"),
                 format!("--stop-with-process={}", std::process::id()),
             ];
             if proxy_configured(&settings) {
@@ -330,9 +352,10 @@ pub(crate) fn proxy_configured(settings: &Settings) -> bool {
 
 // ---------- 任务入队 / 控制 ----------
 
-/// 入队下载（插入 DB → addUri → 回写 gid）
-pub async fn enqueue(
+/// 将下载任务提交给 aria2 引擎（addUri → 回写 gid，不插入 DB）
+async fn add_to_aria2(
     app: &AppHandle,
+    id: i64,
     url: &str,
     file_name: &str,
     headers: &[(String, String)],
@@ -340,25 +363,10 @@ pub async fn enqueue(
     cleanup_id: &str,
     start_paused: bool,
     mirrors: Vec<String>,
-) -> AppResult<i64> {
+) -> AppResult<String> {
     let state = app.state::<AppState>();
     let settings = state.load_settings();
     let dir = resolve_download_dir(app, &settings);
-
-    let headers_json = serde_json::to_string(&headers)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let id = {
-        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-        conn.query_row(
-            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, create_time, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) RETURNING id",
-            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, now],
-            |r| r.get::<_, i64>(0),
-        )?
-    };
 
     let mut uris = vec![url.to_string()];
     for m in mirrors {
@@ -382,17 +390,27 @@ pub async fn enqueue(
     };
     let min_split = format!("{}M", settings.download_min_split_mb.clamp(1, 64));
 
-    let mut options = json!({
-        "dir": dir.display().to_string(),
-        "out": file_name,
-        "header": header_list,
-        "split": split,
-        "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
-        "min-split-size": min_split,
-        "continue": "true",
-        "max-tries": settings.download_retry_count.clamp(0, 10),
-        "max-file-not-found": 3,
-    });
+    let is_magnet = url.starts_with("magnet:?");
+    let mut options = if is_magnet {
+        json!({
+            "dir": dir.display().to_string(),
+            "continue": "true",
+            "bt-tracker": DEFAULT_BT_TRACKERS,
+            "seed-time": "0",
+        })
+    } else {
+        json!({
+            "dir": dir.display().to_string(),
+            "out": file_name,
+            "header": header_list,
+            "split": split,
+            "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
+            "min-split-size": min_split,
+            "continue": "true",
+            "max-tries": settings.download_retry_count.clamp(0, 10),
+            "max-file-not-found": 3,
+        })
+    };
     if start_paused {
         options["paused"] = json!("true");
     }
@@ -415,6 +433,93 @@ pub async fn enqueue(
         "download",
         &format!("已加入下载：{file_name}"),
         &format!("任务 #{id} gid={gid} split={split} 镜像源={mirror_count} {}", if cleanup_id.is_empty() { String::new() } else { format!("cleanup={cleanup_id}") }),
+    );
+    Ok(gid)
+}
+
+/// 入队下载（插入 DB → add_to_aria2）
+pub async fn enqueue(
+    app: &AppHandle,
+    url: &str,
+    file_name: &str,
+    headers: &[(String, String)],
+    platform: &str,
+    cleanup_id: &str,
+    start_paused: bool,
+    mirrors: Vec<String>,
+) -> AppResult<i64> {
+    let state = app.state::<AppState>();
+    let headers_json = serde_json::to_string(&headers)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let id = {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.query_row(
+            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, create_time, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) RETURNING id",
+            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, now],
+            |r| r.get::<_, i64>(0),
+        )?
+    };
+
+    add_to_aria2(app, id, url, file_name, headers, platform, cleanup_id, start_paused, mirrors).await?;
+    Ok(id)
+}
+
+/// 提交本地 BT 种子文件（.torrent）入队下载
+pub async fn enqueue_torrent(
+    app: &AppHandle,
+    torrent_bytes: &[u8],
+    file_name: &str,
+) -> AppResult<i64> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(torrent_bytes);
+    let state = app.state::<AppState>();
+    let settings = state.load_settings();
+    let dir = resolve_download_dir(app, &settings);
+
+    let options = json!({
+        "dir": dir.display().to_string(),
+        "continue": "true",
+        "bt-tracker": DEFAULT_BT_TRACKERS,
+        "seed-time": "0",
+    });
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let id = {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.query_row(
+            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, create_time, status) \
+             VALUES (?1, ?2, '[]', 'magnet', '', ?3, 1) RETURNING id",
+            rusqlite::params![format!("torrent:{file_name}"), file_name, now],
+            |r| r.get::<_, i64>(0),
+        )?
+    };
+
+    let gid = match rpc_call("aria2.addTorrent", vec![json!(b64), json!([]), options]).await {
+        Ok(v) => v.as_str().unwrap_or("").to_string(),
+        Err(e) => {
+            state.log(crate::logger::ERROR, "magnet", "download", &format!("种子解析入队失败：{file_name}"), &e.to_string());
+            return Err(e);
+        }
+    };
+
+    {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.execute("UPDATE download_task SET gid = ?1 WHERE id = ?2", rusqlite::params![gid, id])?;
+    }
+    state.log(
+        crate::logger::SUCCESS,
+        "magnet",
+        "download",
+        &format!("BT 种子已加入下载：{file_name}"),
+        &format!("任务 #{id} gid={gid}"),
     );
     Ok(id)
 }
@@ -460,33 +565,7 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     if !unpaused {
         // 重新入队 aria2（用于从失败态恢复或 unpause 失败时重入队，支持断点续传）
         let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
-        let settings = state.load_settings();
-        let dir = resolve_download_dir(app, &settings);
-        let mut header_list: Vec<String> = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-        if !header_list.iter().any(|h| h.to_lowercase().starts_with("user-agent")) {
-            header_list.push(format!("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
-        }
-        let options = json!({
-            "dir": dir.display().to_string(),
-            "out": file_name,
-            "header": header_list,
-            "split": settings.download_threads.clamp(1, 128),
-            "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
-            "min-split-size": format!("{}M", settings.download_min_split_mb.clamp(1, 64)),
-            "continue": "true",
-            "max-tries": settings.download_retry_count.clamp(0, 10),
-            "lowest-speed-limit": "10K",
-            "max-file-not-found": 3,
-        });
-        let new_gid = rpc_call("aria2.addUri", vec![json!([url]), options])
-            .await?
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        if !new_gid.is_empty() {
-            let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-            conn.execute("UPDATE download_task SET gid = ?1 WHERE id = ?2", rusqlite::params![new_gid, id])?;
-        }
+        add_to_aria2(app, id, &url, &file_name, &headers, &_platform, &_cleanup_id, false, Vec::new()).await?;
     }
 
     update_status(app, id, DownloadTaskView::STATUS_DOWNLOADING, "").await
@@ -671,7 +750,7 @@ async fn resume_pending_tasks(app: &AppHandle) {
             let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
             let _ = conn.execute("UPDATE download_task SET gid = '' WHERE id = ?1", rusqlite::params![id]);
         }
-        if let Err(e) = enqueue(app, &url, &file_name, &headers, &platform, &cleanup_id, was_paused, Vec::new()).await {
+        if let Err(e) = add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, was_paused, Vec::new()).await {
             eprintln!("[yunx] 恢复任务 {id} 失败: {e}");
             let _ = update_status(app, id, DownloadTaskView::STATUS_FAILED, &e.to_string()).await;
         }

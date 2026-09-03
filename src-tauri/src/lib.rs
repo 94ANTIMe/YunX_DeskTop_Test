@@ -34,6 +34,15 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let handle = window.app_handle();
+                if handle.state::<AppState>().load_settings().minimize_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // 应用数据目录（%APPDATA%\com.yunx.desktop）初始化 SQLite + 设置 + 迅雷指纹
             let data_dir = app.path().app_data_dir()?;
@@ -61,30 +70,18 @@ pub fn run() {
                 clipboard::spawn(handle).await;
             });
 
-            // 最小化 → 托盘监测（tauri 2 无 Minimized 事件，轮询 is_minimized 实现）
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let mut was_min = false;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let Some(window) = handle.get_webview_window("main") else { break };
-                    let Ok(min) = window.is_minimized() else { continue };
-                    if min && !was_min {
-                        if handle.state::<AppState>().load_settings().minimize_to_tray {
-                            let _ = window.hide();
-                        }
-                        was_min = true;
-                    } else if !min {
-                        was_min = false;
-                    }
-                }
-            });
-
             // 开机自启状态与设置对齐（幂等）
             let settings = app.state::<AppState>().load_settings();
             if settings.auto_launch {
                 use tauri_plugin_autostart::ManagerExt;
                 let _ = app.autolaunch().enable();
+            }
+
+            // 确保主窗口显示且置顶聚焦
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.show();
+                let _ = main_window.unminimize();
+                let _ = main_window.set_focus();
             }
 
             Ok(())
@@ -94,6 +91,7 @@ pub fn run() {
             commands::app::set_auto_launch,
             commands::settings::get_settings,
             commands::settings::update_settings,
+            commands::settings::test_baidu_speed_service,
             commands::accounts::list_accounts,
             commands::accounts::list_account_rows,
             commands::accounts::switch_account,
@@ -103,6 +101,8 @@ pub fn run() {
             commands::accounts::xunlei_login,
             commands::accounts::xunlei_sms_login,
             commands::accounts::pan123_login,
+            commands::accounts::list_personal_files,
+            commands::accounts::get_personal_download_link,
             commands::network::test_proxy,
             commands::resolve::parse_share_link,
             commands::resolve::resolve_share,
@@ -115,6 +115,8 @@ pub fn run() {
             commands::search::pansou_search,
             commands::search::pansou_ping,
             commands::download::enqueue_download,
+            commands::download::enqueue_torrent,
+            commands::download::enqueue_torrent_file,
             commands::download::pause_download,
             commands::download::resume_download,
             commands::download::pause_all_downloads,

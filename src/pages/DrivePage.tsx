@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, ChevronDown, ExternalLink, LogIn, LogOut } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, FolderOpen, LogIn, LogOut } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import LoginDialog from "../components/LoginDialog";
+import PanFileManager from "../components/PanFileManager";
 import { errMsg, ipc, onLoginSuccess, type AccountRow, type AccountSummary } from "../lib/ipc";
+import type { TabId } from "../lib/tabs";
 import driveHero from "../assets/art/drive-hero.jpg";
 
 interface DrivePlatform {
@@ -13,6 +15,11 @@ interface DrivePlatform {
   note?: string;
   /** 平台个人主页（默认浏览器打开） */
   home: string;
+}
+
+interface DrivePageProps {
+  onNavigate?: (tab: TabId) => void;
+  onGoResolve?: (url: string, pwd?: string) => void;
 }
 
 /** 6 平台卡片（对齐 Android 网盘页；登录态真实读取） */
@@ -25,14 +32,15 @@ const PLATFORMS: DrivePlatform[] = [
   { id: "pan123", name: "123 云盘", latin: "123PAN", home: "https://www.123pan.com/" },
 ];
 
-/** 网盘页：账号登录/登出（登录方式：夸克/UC/百度/139 WebView；迅雷密码+短信；123 账密 JWT） */
-export default function DrivePage() {
+/** 网盘页：账号登录/登出 + 个人网盘文件浏览与一键直链直取 */
+export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = {}) {
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   // 各平台账号行缓存（拉开下拉时按需加载）
   const [rows, setRows] = useState<Record<string, AccountRow[]>>({});
   // 当前展开的账号下拉（platform | null）
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [loginPlatform, setLoginPlatform] = useState<string | null>(null);
+  const [activeFileManager, setActiveFileManager] = useState<{ platform: string; nickname: string } | null>(null);
   const [error, setError] = useState("");
 
   async function refresh() {
@@ -102,6 +110,18 @@ export default function DrivePage() {
   }
 
   const summary = (id: string) => accounts.find((a) => a.platform === id);
+
+  if (activeFileManager) {
+    return (
+      <PanFileManager
+        platform={activeFileManager.platform}
+        nickname={activeFileManager.nickname}
+        onBack={() => setActiveFileManager(null)}
+        onNavigate={(t) => onNavigate?.(t)}
+        onGoResolve={onGoResolve}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -208,8 +228,18 @@ export default function DrivePage() {
                   title="使用电脑默认浏览器打开个人信息页"
                 >
                   <ExternalLink size={12} />
-                  个人信息页
+                  主页
                 </button>
+                {acc?.loggedIn && ["baidu", "quark", "pan123"].includes(p.id) && (
+                  <button
+                    onClick={() => setActiveFileManager({ platform: p.id, nickname: acc.nickname || "" })}
+                    className="flex shrink-0 items-center gap-1 rounded-ctrl bg-clay/10 text-clay-deep border border-clay/30 px-3 py-1.5 text-xs font-semibold hover:bg-clay hover:text-white transition-colors"
+                    title="浏览该网盘个人文件并一键直链下载"
+                  >
+                    <FolderOpen size={12} />
+                    浏览文件
+                  </button>
+                )}
                 {acc?.loggedIn ? (
                   <button
                     onClick={() => logout(p.id)}

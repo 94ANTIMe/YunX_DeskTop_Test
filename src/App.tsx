@@ -94,8 +94,8 @@ export default function App() {
   }
 
   /** 搜索结果 / 剪贴板转入解析：填入链接并自动开始解析 */
-  function goResolve(link: string, pwd: string) {
-    setPendingResolve({ link, pwd });
+  function goResolve(link: string, pwd?: string) {
+    setPendingResolve({ link, pwd: pwd || "" });
     setClipShare(null);
     setTab("resolve");
   }
@@ -150,13 +150,13 @@ export default function App() {
             />
           </div>
           <div className={tab === "drive" ? "block" : "hidden"}>
-            <DrivePage />
+            <DrivePage onNavigate={setTab} onGoResolve={goResolve} />
           </div>
           <div className={tab === "search" ? "block" : "hidden"}>
             <SearchPage active={tab === "search"} onGoResolve={goResolve} />
           </div>
           <div className={tab === "download" ? "block" : "hidden"}>
-            <DownloadPage onNavigate={setTab} />
+            <DownloadPage onNavigate={setTab} onGoResolve={goResolve} />
           </div>
           <div className={tab === "logs" ? "block" : "hidden"}>
             <LogsPage />

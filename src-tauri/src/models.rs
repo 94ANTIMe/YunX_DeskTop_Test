@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// 网盘平台标识
+/// 网盘与通用下载平台标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     Quark,
@@ -9,6 +9,8 @@ pub enum Platform {
     Baidu,
     C139,
     Pan123,
+    Direct,
+    Magnet,
 }
 
 impl Platform {
@@ -21,6 +23,8 @@ impl Platform {
             Platform::Baidu => "baidu",
             Platform::C139 => "c139",
             Platform::Pan123 => "pan123",
+            Platform::Direct => "direct",
+            Platform::Magnet => "magnet",
         }
     }
 
@@ -32,6 +36,8 @@ impl Platform {
             "baidu" => Platform::Baidu,
             "c139" => Platform::C139,
             "pan123" => Platform::Pan123,
+            "direct" => Platform::Direct,
+            "magnet" => Platform::Magnet,
             _ => return None,
         })
     }

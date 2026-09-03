@@ -95,7 +95,7 @@ pub(crate) fn extract_urls(text: &str) -> Vec<String> {
     urls
 }
 
-/// 判断是否为安全合法的百度网盘源站物理节点（绝不能是报 403 的运营商 CDN 代理或 Anycast 边缘）
+/// 判断是否为安全合法的百度网盘源站物理机房节点（绝不能是报 403 的运营商 CDN 代理或 Anycast 边缘）
 pub fn is_safe_origin_node(u: &str) -> bool {
     let host = u.split('/').nth(2).unwrap_or("");
     (host.starts_with("bdd0.")
@@ -112,26 +112,49 @@ pub fn is_safe_origin_node(u: &str) -> bool {
         && !host.contains("allall")
 }
 
-/// 探测并挑选出所有支持正常分片下载的直连源站与健康镜像节点
+/// 探测并挑选出所有支持正常分片下载的直连源站与健康镜像节点（全并发探测，毫秒级响应）
 async fn pick_all_working_urls(client: &Client, urls: &[String]) -> Vec<String> {
-    let mut working = Vec::new();
+    let safe_urls: Vec<String> = urls.iter().filter(|u| is_safe_origin_node(u)).cloned().collect();
+    if safe_urls.is_empty() {
+        return Vec::new();
+    }
 
-    // 1. 优先提取并探测所有源站物理节点（保定、西安、阳泉、广州等），严格过滤 CDN 代理
-    for url in urls.iter().filter(|u| is_safe_origin_node(u)) {
-        if let Ok(resp) = client
-            .get(url)
-            .header("User-Agent", UA)
-            .header("Range", "bytes=0-0")
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        {
-            let s = resp.status();
-            // 200 或 206 均表明分片连接握手成功
-            if (s.is_success() || s == reqwest::StatusCode::PARTIAL_CONTENT) && !working.contains(url) {
-                working.push(url.clone());
+    // 1. 全并发异步轻量探测（bytes=0-0 仅耗 1 字节）
+    let probe_futures = safe_urls.iter().map(|url| {
+        let client = client.clone();
+        let u = url.clone();
+        async move {
+            let res = client
+                .get(&u)
+                .header("User-Agent", UA)
+                .header("Range", "bytes=0-0")
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await;
+            match res {
+                Ok(resp) => {
+                    let s = resp.status();
+                    if s.is_success() || s == reqwest::StatusCode::PARTIAL_CONTENT {
+                        Some(u)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
             }
         }
+    });
+
+    let probe_results = futures_util::future::join_all(probe_futures).await;
+    let mut working = Vec::new();
+    for u in probe_results.into_iter().flatten() {
+        if !working.contains(&u) {
+            working.push(u);
+        }
+    }
+
+    if working.is_empty() {
+        working = safe_urls;
     }
 
     // 2. 将不同机房/域名的节点交错排列，确保多镜像源最大化分散到不同物理数据中心
@@ -155,6 +178,9 @@ async fn pick_all_working_urls(client: &Client, urls: &[String]) -> Vec<String> 
     interleaved
 }
 
+/// 登录凭据缓存（避免每次取链重复执行耗时 2 秒的网络握手）
+static LAST_LOGGED_COOKIE: std::sync::OnceLock<tokio::sync::Mutex<String>> = std::sync::OnceLock::new();
+
 /// 登录 + 取全部可用直链镜像（locate_urls）：返回多机房多节点镜像列表供 aria2 多源并发下载
 pub async fn locate_urls(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<Vec<String>> {
     let _guard = RUN_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
@@ -163,25 +189,45 @@ pub async fn locate_urls(client: &Client, cookie: &str, path: &str, data_dir: &s
     } else {
         format!("locate {path}")
     };
+
+    let cache_lock = LAST_LOGGED_COOKIE.get_or_init(|| tokio::sync::Mutex::new(String::new()));
+    let mut cached = cache_lock.lock().await;
+
     for attempt in 1..=4 {
-        let commands = vec![
-            format!("login --cookies=\"{cookie}\""),
-            locate_cmd.clone(),
-        ];
+        let need_login = *cached != cookie || !config_dir(data_dir).join("pcs_config.json").exists();
+        let commands = if need_login {
+            vec![
+                format!("login --cookies=\"{cookie}\""),
+                locate_cmd.clone(),
+            ]
+        } else {
+            vec![locate_cmd.clone()]
+        };
+
         let out = run_commands(data_dir, &commands).await?;
+        if out.contains("未登录") || out.contains("登录失败") {
+            *cached = String::new();
+            if !need_login {
+                continue;
+            }
+        } else if need_login {
+            *cached = cookie.to_string();
+        }
+
         let candidates = extract_urls(&out);
         let working = pick_all_working_urls(client, &candidates).await;
         if !working.is_empty() {
             return Ok(working);
         }
         if attempt < 4 {
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
     Err(AppError::Api("百度取链失败：未获取到有效直连源站节点，请稍后重试".into()))
 }
 
 /// 兼容老调用的单直链获取
+#[allow(dead_code)]
 pub async fn locate(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<String> {
     let urls = locate_urls(client, cookie, path, data_dir).await?;
     urls.first().cloned().ok_or_else(|| AppError::Api("百度取链失败：未获取到有效下载链接".into()))
