@@ -374,17 +374,13 @@ pub async fn enqueue(
         header_list.push(format!("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
     }
 
-    // 激进并发优化：针对百度或多镜像任务，放宽至最高 128 分片，并设置 1M 最小分片使多镜像立即建立连接
-    let split = if mirror_count > 1 || platform == "baidu" {
-        (settings.download_threads.max(32) * 2).clamp(16, 128)
+    // 针对百度及多镜像任务优化并发连接：安全平衡多镜像吞吐，避免超过单 IP 并发上限导致 EOF 或中断
+    let split = if mirror_count > 1 {
+        (settings.download_threads.clamp(16, 64) * (mirror_count as i32).min(2)).clamp(16, 64)
     } else {
-        settings.download_threads.clamp(1, 128)
+        settings.download_threads.clamp(1, 64)
     };
-    let min_split = if mirror_count > 1 || platform == "baidu" {
-        "1M".to_string()
-    } else {
-        format!("{}M", settings.download_min_split_mb.clamp(1, 64))
-    };
+    let min_split = format!("{}M", settings.download_min_split_mb.clamp(1, 64));
 
     let mut options = json!({
         "dir": dir.display().to_string(),
@@ -395,7 +391,6 @@ pub async fn enqueue(
         "min-split-size": min_split,
         "continue": "true",
         "max-tries": settings.download_retry_count.clamp(0, 10),
-        "lowest-speed-limit": "10K",
         "max-file-not-found": 3,
     });
     if start_paused {
