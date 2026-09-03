@@ -250,7 +250,7 @@ pub async fn refresh_password(state: &AppState) -> AppResult<String> {
         &cookie,
     )
     .await?;
-    let url = match crate::baidupcs::locate(&cookie, &new_path, &state.data_dir).await {
+    let url = match crate::baidupcs::locate(&state.http, &cookie, &new_path, &state.data_dir).await {
         Ok(u) => u,
         Err(e) => {
             let _ = crate::baidupcs::remove(&cookie, &new_path, &state.data_dir).await;

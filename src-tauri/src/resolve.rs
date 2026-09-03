@@ -291,21 +291,19 @@ async fn baidu_official_link(state: &AppState, session_key: &str, file: &ShareFi
         state.log(logger::ERROR, "baidu", "transfer", "回退官方链路：转存失败", &e.to_string());
         baidu_err_hint(e)
     })?;
-    let url = crate::baidupcs::locate(&cookie, &new_path, &state.data_dir)
+    let url = crate::baidupcs::locate(&state.http, &cookie, &new_path, &state.data_dir)
         .await
         .map_err(|e| {
             state.log(logger::ERROR, "baidu", "link", "回退官方链路：取链失败", &format!("path={new_path} {e}"));
             e
         })?;
-    // 取链后即时清理（locate 直链自带 sign/expires，删除不影响下载；sidecar 通道免疫 132 风控）
-    let _ = crate::baidupcs::remove(&cookie, &new_path, &state.data_dir).await;
     Ok(DownloadLink {
         url,
         filename: file.fname.clone(),
         size: file.fsize,
         headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
         platform: "baidu".into(),
-        cleanup_id: String::new(),
+        cleanup_id: new_path,
     })
 }
 
@@ -731,21 +729,19 @@ pub async fn get_download_link(
             })?;
             state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
             // 取链改用 BaiduPCS-Go locate（动态设备签名；locatedownload 硬编码签名已失效 403）
-            let url = crate::baidupcs::locate(&cookie, &new_path, &state.data_dir)
+            let url = crate::baidupcs::locate(&state.http, &cookie, &new_path, &state.data_dir)
                 .await
                 .map_err(|e| {
                     state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
                     e
                 })?;
-            // 取链后即时清理（locate 直链自带 sign/expires，删除不影响下载；sidecar 通道免疫 132 风控）
-            let _ = crate::baidupcs::remove(&cookie, &new_path, &state.data_dir).await;
             Ok(DownloadLink {
                 url,
                 filename: file.fname.clone(),
                 size: file.fsize,
                 headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
                 platform: platform.key().to_string(),
-                cleanup_id: String::new(),
+                cleanup_id: new_path,
             })
         }
         Platform::C139 => {
@@ -823,3 +819,14 @@ pub async fn cleanup_quark(state: &AppState, cleanup_id: &str) {
         let _ = quark::delete_file(&state.http, cleanup_id, &cookie).await;
     }
 }
+
+/// 百度网盘延迟清理（下载完成或任务删除后调用；由 aria2 引擎触发）
+pub async fn cleanup_baidu(state: &AppState, cleanup_path: &str) {
+    if cleanup_path.is_empty() {
+        return;
+    }
+    if let Ok(cookie) = load_account_cookie(state, Platform::Baidu, "") {
+        let _ = crate::baidupcs::remove(&cookie, cleanup_path, &state.data_dir).await;
+    }
+}
+

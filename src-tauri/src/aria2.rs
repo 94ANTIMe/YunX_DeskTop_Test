@@ -318,14 +318,67 @@ pub async fn pause(app: &AppHandle, id: i64) -> AppResult<()> {
 
 /// 恢复
 pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
-    let gid = gid_of(app, id)?;
-    if !gid.is_empty() {
-        let _ = rpc_call("aria2.unpause", vec![json!(gid)]).await;
+    let state = app.state::<AppState>();
+    let (gid, url, file_name, headers_json, _platform, _cleanup_id, status) = {
+        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+        conn.query_row(
+            "SELECT gid, url, file_name, request_headers_json, platform, cleanup_id, status FROM download_task WHERE id = ?1",
+            rusqlite::params![id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i32>(6)?,
+                ))
+            },
+        )?
+    };
+
+    let mut unpaused = false;
+    if !gid.is_empty() && status == DownloadTaskView::STATUS_PAUSED {
+        if rpc_call("aria2.unpause", vec![json!(gid)]).await.is_ok() {
+            unpaused = true;
+        }
     }
+
+    if !unpaused {
+        // 重新入队 aria2（用于从失败态恢复或 unpause 失败时重入队，支持断点续传）
+        let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
+        let settings = state.load_settings();
+        let dir = resolve_download_dir(app, &settings);
+        let mut header_list: Vec<String> = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+        if !header_list.iter().any(|h| h.to_lowercase().starts_with("user-agent")) {
+            header_list.push(format!("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
+        }
+        let options = json!({
+            "dir": dir.display().to_string(),
+            "out": file_name,
+            "header": header_list,
+            "split": settings.download_threads.clamp(1, 64),
+            "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
+            "min-split-size": format!("{}M", settings.download_min_split_mb.clamp(1, 64)),
+            "continue": "true",
+            "max-tries": settings.download_retry_count.clamp(0, 10),
+        });
+        let new_gid = rpc_call("aria2.addUri", vec![json!([url]), options])
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if !new_gid.is_empty() {
+            let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+            conn.execute("UPDATE download_task SET gid = ?1 WHERE id = ?2", rusqlite::params![new_gid, id])?;
+        }
+    }
+
     update_status(app, id, DownloadTaskView::STATUS_DOWNLOADING, "").await
 }
 
-/// 删除任务（aria2 remove + DB 删除 + 夸克转存清理）
+/// 删除任务（aria2 remove + DB 删除 + 转存清理）
 pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<()> {
     let state = app.state::<AppState>();
     let (gid, file_name, cleanup_id, platform) = {
@@ -358,9 +411,11 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.execute("DELETE FROM download_task WHERE id = ?1", rusqlite::params![id])?;
     }
-    // 删除任务同样触发夸克转存清理（用户放弃下载）
+    // 删除任务同样触发夸克 / 百度转存清理（用户放弃下载）
     if platform == "quark" && !cleanup_id.is_empty() {
         crate::resolve::cleanup_quark(&state, &cleanup_id).await;
+    } else if platform == "baidu" && !cleanup_id.is_empty() {
+        crate::resolve::cleanup_baidu(&state, &cleanup_id).await;
     }
     Ok(())
 }
@@ -597,6 +652,9 @@ async fn poll_loop(app: AppHandle) {
                 if platform == "quark" && !cleanup_id.is_empty() {
                     let state_ref = app.state::<AppState>();
                     crate::resolve::cleanup_quark(&state_ref, &cleanup_id).await;
+                } else if platform == "baidu" && !cleanup_id.is_empty() {
+                    let state_ref = app.state::<AppState>();
+                    crate::resolve::cleanup_baidu(&state_ref, &cleanup_id).await;
                 }
             } else if new_status == DownloadTaskView::STATUS_FAILED && db_status != DownloadTaskView::STATUS_FAILED {
                 {

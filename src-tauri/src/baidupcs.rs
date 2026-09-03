@@ -1,12 +1,12 @@
 //! BaiduPCS-Go sidecar 集成：登录 + 取直链（locate）。
 //! 背景：api::baidu::locate_download 硬编码设备签名（devuid/cuid/psign），百度校验签名
 //! 一旦失效即返回 403（hitcode:104），百度取链完全不可用。BaiduPCS-Go 动态计算签名，
-//! 经实测 locate 直链可正常交给 aria2 下载（Range 分片 + 优先 bdd0/bjdd 节点）。
-//! 因此取链步骤改用本模块，转存（transfer）仍走 api::baidu（该链路已验证可用）。
+//! 经实测 locate 直链可正常交给 aria2 下载（优先 bdd0/xad0 等直连源站节点）。
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -47,11 +47,16 @@ fn config_dir(data_dir: &std::path::Path) -> PathBuf {
 
 /// 在 BaiduPCS-Go 交互会话中依次执行命令，返回全部 stdout
 async fn run_commands(data_dir: &std::path::Path, commands: &[String]) -> AppResult<String> {
-    let mut child = Command::new(sidecar()?)
-        .env("BAIDUPCS_GO_CONFIG_DIR", config_dir(data_dir))
+    let mut cmd = Command::new(sidecar()?);
+    cmd.env("BAIDUPCS_GO_CONFIG_DIR", config_dir(data_dir))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW: 静默后台运行，禁止弹出控制台黑窗
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| AppError::Api(format!("百度下载组件启动失败: {e}")))?;
 
@@ -75,27 +80,81 @@ async fn run_commands(data_dir: &std::path::Path, commands: &[String]) -> AppRes
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// 从 locate 输出提取直链：优先 bdd0/bjdd 节点（完整 GET 与 Range 均可），否则取首条
-fn pick_url(text: &str) -> Option<String> {
-    let mut preferred: Option<String> = None;
-    let mut fallback: Option<String> = None;
+/// 从 locate 输出提取全部候选直链（已剥离尾随 ANSI 复位码）
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
     for m in url_re().find_iter(text) {
         let mut url = m.as_str().to_string();
-        // 剥离尾随 ANSI 复位码（如 \x1b[0m）
         if let Some(pos) = url.find('\u{1b}') {
             url.truncate(pos);
         }
-        if url.contains("bdd0.baidupcs.com") || url.contains("bjdd") {
-            preferred.get_or_insert_with(|| url.clone());
-        } else if fallback.is_none() {
-            fallback = Some(url);
+        if !urls.contains(&url) {
+            urls.push(url);
         }
     }
-    preferred.or(fallback)
+    urls
+}
+
+/// 优先选择支持全量探测的直连源站节点（如 bdd0, xad0, gzdd, shdd, njdd, qd00 等），
+/// 避开对非 Range 探测报 403 (hitcode:104) 的 CDN 代理节点（如 allall01, bjdd-ct* 等）。
+async fn pick_best_url(client: &Client, urls: &[String]) -> Option<String> {
+    if urls.is_empty() {
+        return None;
+    }
+
+    let is_origin_node = |u: &str| {
+        u.contains("bdd0.baidupcs.com")
+            || u.contains("xad0.baidupcs.com")
+            || u.contains("gzdd.baidupcs.com")
+            || u.contains("shdd.baidupcs.com")
+            || u.contains("njdd.baidupcs.com")
+            || u.contains("qd00.baidupcs.com")
+            || u.contains("d.pcs.baidu.com")
+    };
+
+    // 1. 优先源站节点，发一次快速 200 验证
+    for url in urls.iter().filter(|u| is_origin_node(u)) {
+        if let Ok(resp) = client
+            .get(url)
+            .header("User-Agent", UA)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                return Some(url.clone());
+            }
+        }
+    }
+
+    // 2. 依次探测候选节点，选出首个支持正常 GET（非 403）的节点
+    for url in urls {
+        if let Ok(resp) = client
+            .get(url)
+            .header("User-Agent", UA)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            let s = resp.status();
+            if s.is_success() && s.as_u16() != 403 {
+                return Some(url.clone());
+            }
+        }
+    }
+
+    // 3. 回退：避开含有 allall 与运营商代理 (-ct, -cu, -cm) 的节点
+    for url in urls {
+        if !url.contains("allall") && !url.contains("-ct") && !url.contains("-cu") && !url.contains("-cm") {
+            return Some(url.clone());
+        }
+    }
+
+    urls.first().cloned()
 }
 
 /// 登录 + 取直链（locate）：返回可交给 aria2 下载的 URL
-pub async fn locate(cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<String> {
+pub async fn locate(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<String> {
     let _guard = RUN_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     // 路径含空格时加引号（BaiduPCS-Go 交互 shell 按引号解析）
     let locate_cmd = if path.chars().any(|c| c.is_whitespace()) {
@@ -109,11 +168,11 @@ pub async fn locate(cookie: &str, path: &str, data_dir: &std::path::Path) -> App
             locate_cmd.clone(),
         ];
         let out = run_commands(data_dir, &commands).await?;
-        if let Some(url) = pick_url(&out) {
+        let candidates = extract_urls(&out);
+        if let Some(url) = pick_best_url(client, &candidates).await {
             return Ok(url);
         }
         if attempt < 3 {
-            // locate 偶发未返回直链，重试（每次换新 sign）
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
