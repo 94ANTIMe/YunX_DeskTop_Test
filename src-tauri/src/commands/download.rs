@@ -4,7 +4,7 @@ use crate::aria2;
 use crate::error::AppResult;
 use crate::models::{DownloadDetail, DownloadTaskView};
 
-/// 入队下载任务（直链 + 请求头 → aria2）
+/// 入队下载任务（直链 + 多源镜像 + 请求头 → aria2）
 #[tauri::command]
 pub async fn enqueue_download(
     app: AppHandle,
@@ -13,6 +13,7 @@ pub async fn enqueue_download(
     headers: Vec<(String, String)>,
     platform: String,
     cleanup_id: Option<String>,
+    mirrors: Option<Vec<String>>,
 ) -> AppResult<i64> {
     aria2::enqueue(
         &app,
@@ -22,6 +23,7 @@ pub async fn enqueue_download(
         &platform,
         cleanup_id.as_deref().unwrap_or(""),
         false,
+        mirrors.unwrap_or_default(),
     )
     .await
 }

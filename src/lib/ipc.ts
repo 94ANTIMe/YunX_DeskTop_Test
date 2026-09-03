@@ -162,6 +162,7 @@ export interface DownloadLink {
   headers: [string, string][];
   platform: string;
   cleanupId: string;
+  mirrors?: string[];
 }
 
 export interface DownloadTask {
@@ -317,8 +318,22 @@ export const ipc = {
   getDownloadLink: (sessionKey: string, file: ShareFile) =>
     invoke<DownloadLink>("get_download_link", { sessionKey, file }),
 
-  enqueueDownload: (url: string, fileName: string, headers: [string, string][], platform: string, cleanupId?: string) =>
-    invoke<number>("enqueue_download", { url, fileName, headers, platform, cleanupId }),
+  enqueueDownload: (
+    url: string,
+    fileName: string,
+    headers: [string, string][],
+    platform: string,
+    cleanupId?: string,
+    mirrors?: string[],
+  ) =>
+    invoke<number>("enqueue_download", {
+      url,
+      fileName,
+      headers,
+      platform,
+      cleanupId,
+      mirrors,
+    }),
   pauseDownload: (id: number) => invoke<void>("pause_download", { id }),
   resumeDownload: (id: number) => invoke<void>("resume_download", { id }),
   pauseAllDownloads: () => invoke<void>("pause_all_downloads"),

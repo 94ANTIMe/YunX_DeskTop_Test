@@ -89,8 +89,8 @@ pub struct CollectedFile {
     pub rel_dir: String,
 }
 
-/// 下载直链结果（含下载所需请求头）
-#[derive(Debug, Clone, Serialize)]
+/// 下载直链结果（含下载所需请求头与多镜像源）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadLink {
     pub url: String,
@@ -102,6 +102,9 @@ pub struct DownloadLink {
     pub platform: String,
     /// 取链后需延迟清理的转存文件 id（夸克：下载完成后清理）
     pub cleanup_id: String,
+    /// 多源站镜像下载链接（aria2 多源并发加速）
+    #[serde(default)]
+    pub mirrors: Vec<String>,
 }
 
 /// 账号摘要（前端网盘页展示）

@@ -291,19 +291,22 @@ async fn baidu_official_link(state: &AppState, session_key: &str, file: &ShareFi
         state.log(logger::ERROR, "baidu", "transfer", "回退官方链路：转存失败", &e.to_string());
         baidu_err_hint(e)
     })?;
-    let url = crate::baidupcs::locate(&state.http, &cookie, &new_path, &state.data_dir)
+    let urls = crate::baidupcs::locate_urls(&state.http, &cookie, &new_path, &state.data_dir)
         .await
         .map_err(|e| {
             state.log(logger::ERROR, "baidu", "link", "回退官方链路：取链失败", &format!("path={new_path} {e}"));
             e
         })?;
+    let main_url = urls.first().cloned().unwrap_or_default();
+    let mirrors = if urls.len() > 1 { urls[1..].to_vec() } else { Vec::new() };
     Ok(DownloadLink {
-        url,
+        url: main_url,
         filename: file.fname.clone(),
         size: file.fsize,
         headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
         platform: "baidu".into(),
         cleanup_id: new_path,
+        mirrors,
     })
 }
 
@@ -631,6 +634,7 @@ pub async fn get_download_link(
                 ],
                 platform: platform.key().to_string(),
                 cleanup_id,
+                mirrors: Vec::new(),
             })
         }
         Platform::Uc => {
@@ -656,6 +660,7 @@ pub async fn get_download_link(
                 ],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
+                mirrors: Vec::new(),
             })
         }
         Platform::Baidu if session.accel => {
@@ -706,6 +711,7 @@ pub async fn get_download_link(
                 headers: vec![("User-Agent".into(), ua)],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
+                mirrors: Vec::new(),
             })
         }
         Platform::Baidu => {
@@ -728,20 +734,23 @@ pub async fn get_download_link(
                 e
             })?;
             state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
-            // 取链改用 BaiduPCS-Go locate（动态设备签名；locatedownload 硬编码签名已失效 403）
-            let url = crate::baidupcs::locate(&state.http, &cookie, &new_path, &state.data_dir)
+            // 取链改用 BaiduPCS-Go locate_urls（多地域源站镜像提取）
+            let urls = crate::baidupcs::locate_urls(&state.http, &cookie, &new_path, &state.data_dir)
                 .await
                 .map_err(|e| {
                     state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
                     e
                 })?;
+            let main_url = urls.first().cloned().unwrap_or_default();
+            let mirrors = if urls.len() > 1 { urls[1..].to_vec() } else { Vec::new() };
             Ok(DownloadLink {
-                url,
+                url: main_url,
                 filename: file.fname.clone(),
                 size: file.fsize,
                 headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
                 platform: platform.key().to_string(),
                 cleanup_id: new_path,
+                mirrors,
             })
         }
         Platform::C139 => {
@@ -756,6 +765,7 @@ pub async fn get_download_link(
                 headers: vec![("User-Agent".into(), c139::SHARE_MOBILE_UA.to_string())],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
+                mirrors: Vec::new(),
             })
         }
         Platform::Pan123 => {
@@ -778,6 +788,7 @@ pub async fn get_download_link(
                 ],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
+                mirrors: Vec::new(),
             })
         }
         Platform::Xunlei => {
@@ -805,6 +816,7 @@ pub async fn get_download_link(
                 headers: vec![("User-Agent".into(), xunlei::WEB_UA.into())],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
+                mirrors: Vec::new(),
             })
         }
     }

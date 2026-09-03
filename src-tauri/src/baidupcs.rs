@@ -95,13 +95,9 @@ fn extract_urls(text: &str) -> Vec<String> {
     urls
 }
 
-/// 优先选择支持全量探测的直连源站节点（如 bdd0, xad0, gzdd, shdd, njdd, qd00 等），
-/// 避开对非 Range 探测报 403 (hitcode:104) 的 CDN 代理节点（如 allall01, bjdd-ct* 等）。
-async fn pick_best_url(client: &Client, urls: &[String]) -> Option<String> {
-    if urls.is_empty() {
-        return None;
-    }
-
+/// 探测并挑选出所有支持正常下载的直连源站与优质镜像节点（排在最前的为最优直连源站）
+async fn pick_all_working_urls(client: &Client, urls: &[String]) -> Vec<String> {
+    let mut working = Vec::new();
     let is_origin_node = |u: &str| {
         u.contains("bdd0.baidupcs.com")
             || u.contains("xad0.baidupcs.com")
@@ -113,7 +109,7 @@ async fn pick_best_url(client: &Client, urls: &[String]) -> Option<String> {
             || u.contains("d.pcs.baidu.com")
     };
 
-    // 1. 优先源站节点，发一次快速 200 验证
+    // 1. 优先提取并探测所有源站节点（如保定、西安、阳泉、广州等独立数据中心）
     for url in urls.iter().filter(|u| is_origin_node(u)) {
         if let Ok(resp) = client
             .get(url)
@@ -122,42 +118,68 @@ async fn pick_best_url(client: &Client, urls: &[String]) -> Option<String> {
             .send()
             .await
         {
-            if resp.status().is_success() {
-                return Some(url.clone());
+            if resp.status().is_success() && !working.contains(url) {
+                working.push(url.clone());
             }
         }
     }
 
-    // 2. 依次探测候选节点，选出首个支持正常 GET（非 403）的节点
+    // 2. 补充探测非 403 且非 allall 节点（如电信/联通骨干镜像，丰富跨机房并发源）
     for url in urls {
-        if let Ok(resp) = client
-            .get(url)
-            .header("User-Agent", UA)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        {
-            let s = resp.status();
-            if s.is_success() && s.as_u16() != 403 {
-                return Some(url.clone());
+        if !is_origin_node(url) && !url.contains("allall") {
+            if let Ok(resp) = client
+                .get(url)
+                .header("User-Agent", UA)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            {
+                let s = resp.status();
+                if s.is_success() && s.as_u16() != 403 && !working.contains(url) {
+                    working.push(url.clone());
+                }
             }
         }
     }
 
-    // 3. 回退：避开含有 allall 与运营商代理 (-ct, -cu, -cm) 的节点
-    for url in urls {
-        if !url.contains("allall") && !url.contains("-ct") && !url.contains("-cu") && !url.contains("-cm") {
-            return Some(url.clone());
+    // 若探测均未响应，回退安全节点
+    if working.is_empty() {
+        for url in urls {
+            if !url.contains("allall") && !working.contains(url) {
+                working.push(url.clone());
+            }
+        }
+    }
+    if working.is_empty() {
+        if let Some(first) = urls.first() {
+            working.push(first.clone());
         }
     }
 
-    urls.first().cloned()
+    // 将不同主机名的节点交错排列，确保 aria2 优先分散连接到各独立物理数据中心
+    let mut interleaved = Vec::new();
+    let mut remaining = working;
+    while !remaining.is_empty() {
+        let mut seen_hosts = std::collections::HashSet::new();
+        let mut next_remaining = Vec::new();
+        for u in remaining {
+            let host = u.split('/').nth(2).unwrap_or("").to_string();
+            if !seen_hosts.contains(&host) {
+                seen_hosts.insert(host);
+                interleaved.push(u);
+            } else {
+                next_remaining.push(u);
+            }
+        }
+        remaining = next_remaining;
+    }
+
+    interleaved
 }
 
-/// 登录 + 取直链（locate）：返回可交给 aria2 下载的 URL
-pub async fn locate(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<String> {
+/// 登录 + 取全部可用直链镜像（locate_urls）：返回多机房多节点镜像列表供 aria2 多源并发下载
+pub async fn locate_urls(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<Vec<String>> {
     let _guard = RUN_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-    // 路径含空格时加引号（BaiduPCS-Go 交互 shell 按引号解析）
     let locate_cmd = if path.chars().any(|c| c.is_whitespace()) {
         format!("locate \"{path}\"")
     } else {
@@ -170,14 +192,21 @@ pub async fn locate(client: &Client, cookie: &str, path: &str, data_dir: &std::p
         ];
         let out = run_commands(data_dir, &commands).await?;
         let candidates = extract_urls(&out);
-        if let Some(url) = pick_best_url(client, &candidates).await {
-            return Ok(url);
+        let working = pick_all_working_urls(client, &candidates).await;
+        if !working.is_empty() {
+            return Ok(working);
         }
         if attempt < 3 {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
     Err(AppError::Api("百度取链失败：未获取到有效下载链接".into()))
+}
+
+/// 兼容老调用的单直链获取
+pub async fn locate(client: &Client, cookie: &str, path: &str, data_dir: &std::path::Path) -> AppResult<String> {
+    let urls = locate_urls(client, cookie, path, data_dir).await?;
+    urls.first().cloned().ok_or_else(|| AppError::Api("百度取链失败：未获取到有效下载链接".into()))
 }
 
 /// 登录 + 删除文件（转存清理）。走 PCS 通道，不受网页版 filemanager
