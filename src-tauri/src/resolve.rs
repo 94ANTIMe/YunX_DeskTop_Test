@@ -7,7 +7,7 @@
 //! 迅雷：getShare → restore 临时目录 → 文件详情取链 → 即时清理。
 use uuid::Uuid;
 
-use crate::api::{baidu, c139, pan123, quark, uc, xunlei};
+use crate::api::{baidaccel, baidu, c139, pan123, quark, uc, xunlei};
 use crate::db::accounts::{self, Account};
 use crate::error::{AppError, AppResult};
 use crate::logger;
@@ -38,6 +38,11 @@ pub struct ResolveSession {
     pub last_dir: String,
     pub next_cursor: String,
     pub next_page_token: String,
+    // 百度高速通道（百度分享加速路由）
+    pub accel: bool,
+    pub accel_randsk: String,
+    pub accel_uk: String,
+    pub accel_shareid: String,
 }
 
 impl ResolveSession {
@@ -57,6 +62,10 @@ impl ResolveSession {
             last_dir: String::new(),
             next_cursor: String::new(),
             next_page_token: String::new(),
+            accel: false,
+            accel_randsk: String::new(),
+            accel_uk: String::new(),
+            accel_shareid: String::new(),
         }
     }
 }
@@ -64,7 +73,7 @@ impl ResolveSession {
 /// 会话表容量上限（超出淘汰最旧）
 const MAX_SESSIONS: usize = 32;
 
-fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
+pub(crate) fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     let active = state.active_account_key(&platform);
     match accounts::load(&conn, platform, &active)? {
@@ -137,6 +146,191 @@ async fn quark_transfer_route(
     Ok((url, size, sub_dir))
 }
 
+// ---------- 百度高速通道（百度分享加速路由） ----------
+
+/// 是否命中百度验证码风控（errno 105 等），用于给出明确提示并避免反复硬撞
+fn is_captcha_blocked(e: &AppError) -> bool {
+    match e {
+        AppError::Api(m) => {
+            let m = m.to_lowercase();
+            m.contains("105") || m.contains("验证码") || m.contains("captcha") || m.contains("needverify")
+        }
+        _ => false,
+    }
+}
+
+/// 验证码风控错误 → 明确指引；其余原样返回（供解析码刷新等链路使用）
+pub(crate) fn captcha_hint(e: AppError, hint: &str) -> AppError {
+    if is_captcha_blocked(&e) {
+        AppError::Api(hint.to_string())
+    } else {
+        e
+    }
+}
+
+/// 百度官方接口错误 → 用户可读的明确提示（避免笼统的 errno 直出）
+/// - errno=2 参数错误：多为分享已失效/链接无效
+/// - 登录态相关：提示重新登录
+/// - 其余保留原样
+fn baidu_err_hint(e: AppError) -> AppError {
+    match &e {
+        AppError::Api(m) => {
+            let low = m.to_lowercase();
+            if low.contains("errno=2") || low.contains("参数错误") {
+                AppError::Api("分享可能已失效或链接无效，请确认链接后重试".into())
+            } else if low.contains("errno=4") || low.contains("errno=10") {
+                AppError::Api("百度网盘登录状态异常，请重新登录后重试".into())
+            } else if is_captcha_blocked(&e) {
+                AppError::Api("百度网盘当前触发验证码风控（需要人机验证），请稍后几分钟再试".into())
+            } else {
+                e
+            }
+        }
+        _ => e,
+    }
+}
+
+/// 百度加速列目录：解析码失效（20016）自动刷新一次后重试
+async fn accel_list(state: &AppState, surl: &str, pwd: &str, dir: &str) -> AppResult<baidaccel::AccelListData> {
+    let settings = state.load_settings();
+    let base = baidaccel::base_url_of(&settings);
+    let password = settings.baidu_speed_password;
+    if !password.is_empty() {
+        match baidaccel::get_file_list(&state.http, &base, surl, pwd, dir, &password).await {
+            Ok(v) => return Ok(v),
+            Err(e) if baidaccel::is_password_error(&e) => {
+                state.log(logger::INFO, "baidu", "accel", "解析码失效，尝试自动更新", "");
+            }
+            Err(e) => {
+                state.log(logger::ERROR, "baidu", "accel", "加速列目录失败", &e.to_string());
+                return Err(e);
+            }
+        }
+    }
+    match baidaccel::refresh_password(state).await {
+        Ok(password) => {
+            match baidaccel::get_file_list(&state.http, &base, surl, pwd, dir, &password).await {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    state.log(logger::ERROR, "baidu", "accel", "自动更新解析码后列目录仍失败", &e.to_string());
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            state.log(logger::ERROR, "baidu", "accel", "自动更新解析码失败", &e.to_string());
+            Err(e)
+        }
+    }
+}
+
+/// 百度加速取直链（单次调用）
+async fn accel_fetch_link(
+    state: &AppState,
+    base: &str,
+    session: &ResolveSession,
+    file: &ShareFile,
+    password: &str,
+) -> AppResult<(String, String)> {
+    baidaccel::get_download_links(
+        &state.http, base, &session.share_id, &session.pwd, &file.pdir_fid, &file.fid,
+        &session.accel_randsk, &session.accel_uk, &session.accel_shareid, password,
+    )
+    .await
+}
+
+/// 百度官方链路建会话（PCS 式验证 → 首页列表；加速通道不可用时的回退路线）
+async fn baidu_official_session(
+    state: &AppState,
+    parsed: &crate::models::ParsedShare,
+    session: &mut ResolveSession,
+) -> AppResult<(Vec<ShareFile>, String)> {
+    let cookie = load_account_cookie(state, Platform::Baidu, "请先登录百度网盘")?;
+    let share = baidu::verify_share_pcs(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await.map_err(|e| {
+        state.log(logger::ERROR, "baidu", "verify", "回退官方链路：验证分享失败", &e.to_string());
+        baidu_err_hint(e)
+    })?;
+    session.sekey = share.randsk.clone();
+    session.baidu_share_id = share.share_id.clone();
+    session.baidu_uk = share.uk.clone();
+    let list = baidu::list_share(&state.http, &parsed.share_id, &session.sekey, "/", &cookie, 1)
+        .await
+        .map_err(|e| {
+            state.log(logger::ERROR, "baidu", "list", "回退官方链路：列出分享失败", &e.to_string());
+            baidu_err_hint(e)
+        })?;
+    Ok((list.files, String::new()))
+}
+
+/// 百度官方链路取链（转存 + locate），加速通道取链/直链不可用时回退
+async fn baidu_official_link(state: &AppState, session_key: &str, file: &ShareFile) -> AppResult<DownloadLink> {
+    let mut session = get_session(state, session_key)?;
+    // 若会话尚未持有官方 sekey，现场补建
+    if session.sekey.is_empty() {
+        let parsed = crate::models::ParsedShare {
+            platform: "baidu".into(),
+            share_id: session.share_id.clone(),
+            pwd: session.pwd.clone(),
+        };
+        baidu_official_session(state, &parsed, &mut session).await?;
+    }
+    let cookie = load_account_cookie(state, Platform::Baidu, "请先登录百度网盘")?;
+    let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
+    let (_, new_path) = baidu::transfer(
+        &state.http,
+        &session.share_id,
+        &session.baidu_share_id,
+        &session.baidu_uk,
+        &session.sekey,
+        &file.fid,
+        &temp_dir,
+        &cookie,
+    )
+    .await
+    .map_err(|e| {
+        state.log(logger::ERROR, "baidu", "transfer", "回退官方链路：转存失败", &e.to_string());
+        baidu_err_hint(e)
+    })?;
+    let url = crate::baidupcs::locate(&cookie, &new_path, &state.data_dir)
+        .await
+        .map_err(|e| {
+            state.log(logger::ERROR, "baidu", "link", "回退官方链路：取链失败", &format!("path={new_path} {e}"));
+            e
+        })?;
+    // 取链后即时清理（locate 直链自带 sign/expires，删除不影响下载；sidecar 通道免疫 132 风控）
+    let _ = crate::baidupcs::remove(&cookie, &new_path, &state.data_dir).await;
+    Ok(DownloadLink {
+        url,
+        filename: file.fname.clone(),
+        size: file.fsize,
+        headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
+        platform: "baidu".into(),
+        cleanup_id: String::new(),
+    })
+}
+
+/// 直链可达性探测：发一次 Range 小请求，HTTP 2xx/206 视为可用
+/// 返回 Ok(true) 可用；Err(msg) 记录不可达原因
+async fn link_reachable(client: &reqwest::Client, url: &str, ua: &str) -> Result<bool, String> {
+    let resp = match client
+        .get(url)
+        .header("User-Agent", ua)
+        .header("Range", "bytes=0-0")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Err(format!("请求失败: {e}")),
+    };
+    let status = resp.status();
+    if status.is_success() {
+        Ok(true)
+    } else {
+        Err(format!("HTTP {}", status.as_u16()))
+    }
+}
+
 // ---------- 解析入口（建会话 + 首页列表） ----------
 
 pub async fn resolve_share(state: &AppState, text: &str) -> AppResult<ResolveSessionInfo> {
@@ -206,13 +400,30 @@ async fn build_session(
             (files, title)
         }
         Platform::Baidu => {
-            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
-            let sekey = baidu::verify_share(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
-            session.sekey = sekey;
-            let list = baidu::list_share(&state.http, &parsed.share_id, &session.sekey, "/", &cookie, 1).await?;
-            session.baidu_share_id = list.share_id.clone();
-            session.baidu_uk = list.uk.clone();
-            (list.files, list.title)
+            // 高速通道开启时优先走加速路由，失败回退官方链路
+            let settings = state.load_settings();
+            if settings.baidu_speed_enabled {
+                match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
+                    Ok(data) => {
+                        session.accel = true;
+                        session.accel_randsk = data.randsk.clone();
+                        session.accel_uk = data.uk.clone();
+                        session.accel_shareid = data.shareid.clone();
+                        state.log(logger::INFO, "baidu", "accel", "百度高速通道已启用", "");
+                        return Ok((data.files, data.uname));
+                    }
+                    Err(e) => {
+                        state.log(
+                            logger::ERROR,
+                            "baidu",
+                            "accel",
+                            "加速通道不可用，回退官方链路",
+                            &e.to_string(),
+                        );
+                    }
+                }
+            }
+            baidu_official_session(state, parsed, session).await?
         }
         Platform::C139 => {
             // 139 官方会明文回吐提取码，自动填充
@@ -291,6 +502,14 @@ pub async fn list_share_files(
             let files = uc::get_transfer_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
             let has_more = files.len() >= 100;
             (files, has_more)
+        }
+        Platform::Baidu if session.accel => {
+            // 加速路由：dir_id 即分享内绝对路径；刷新后回写 randsk/uk/shareid
+            let data = accel_list(state, &session.share_id, &session.pwd, dir_id).await?;
+            session.accel_randsk = data.randsk.clone();
+            session.accel_uk = data.uk.clone();
+            session.accel_shareid = data.shareid.clone();
+            (data.files, false)
         }
         Platform::Baidu => {
             let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
@@ -441,12 +660,69 @@ pub async fn get_download_link(
                 cleanup_id: String::new(),
             })
         }
+        Platform::Baidu if session.accel => {
+            // 加速取链：列表已携带 dlink 时直接用（省每日额度），否则调 get_download_links；
+            // 解析码失效（20016）自动刷新一次后重试；直链不可达时自动回退官方链路
+            let (url, ua) = if file.fid_token.starts_with("http") {
+                (file.fid_token.clone(), baidaccel::DOWNLOAD_UA.to_string())
+            } else {
+                let settings = state.load_settings();
+                let base = baidaccel::base_url_of(&settings);
+                let mut password = settings.baidu_speed_password;
+                if password.is_empty() {
+                    password = baidaccel::refresh_password(state).await?;
+                }
+                let link = match accel_fetch_link(state, &base, &session, file, &password).await {
+                    Ok(v) => v,
+                    Err(e) if baidaccel::is_password_error(&e) => {
+                        state.log(logger::INFO, "baidu", "accel", "解析码失效，取链自动更新", "");
+                        let password = baidaccel::refresh_password(state).await?;
+                        accel_fetch_link(state, &base, &session, file, &password).await?
+                    }
+                    Err(e) => {
+                        state.log(logger::ERROR, "baidu", "accel", "加速取链失败", &e.to_string());
+                        return Err(e);
+                    }
+                };
+                // 直链可达性探测；不可达 → 回退官方链路
+                match link_reachable(&state.http, &link.0, &link.1).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        state.log(logger::INFO, "baidu", "accel", "加速直链不可达，回退官方链路", &file.fname);
+                        let official = baidu_official_link(state, session_key, file).await?;
+                        return Ok(official);
+                    }
+                    Err(reason) => {
+                        state.log(logger::INFO, "baidu", "accel", "加速直链探测失败，回退官方链路", &format!("{} {}", file.fname, reason));
+                        let official = baidu_official_link(state, session_key, file).await?;
+                        return Ok(official);
+                    }
+                }
+                link
+            };
+            state.log(logger::SUCCESS, "baidu", "accel", "取链成功", &file.fname);
+            Ok(DownloadLink {
+                url,
+                filename: file.fname.clone(),
+                size: file.fsize,
+                headers: vec![("User-Agent".into(), ua)],
+                platform: platform.key().to_string(),
+                cleanup_id: String::new(),
+            })
+        }
         Platform::Baidu => {
             let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
             let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
             state.log(logger::INFO, "baidu", "transfer", "开始转存", &format!("{} → {}", file.fname, temp_dir));
             let (new_fs_id, new_path) = baidu::transfer(
-                &state.http, &session.baidu_share_id, &session.baidu_uk, &session.sekey, &file.fid, &temp_dir, &cookie,
+                &state.http,
+                &session.share_id,
+                &session.baidu_share_id,
+                &session.baidu_uk,
+                &session.sekey,
+                &file.fid,
+                &temp_dir,
+                &cookie,
             )
             .await
             .map_err(|e| {
@@ -454,22 +730,20 @@ pub async fn get_download_link(
                 e
             })?;
             state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
-            let url = baidu::locate_download(&state.http, &new_path, &cookie)
+            // 取链改用 BaiduPCS-Go locate（动态设备签名；locatedownload 硬编码签名已失效 403）
+            let url = crate::baidupcs::locate(&cookie, &new_path, &state.data_dir)
                 .await
                 .map_err(|e| {
                     state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
                     e
                 })?;
-            // 取链后即时清理（locatedownload 直链自带 sign/expires，删除不影响）
-            let _ = baidu::delete_file(&state.http, &new_path, &cookie).await;
+            // 取链后即时清理（locate 直链自带 sign/expires，删除不影响下载；sidecar 通道免疫 132 风控）
+            let _ = crate::baidupcs::remove(&cookie, &new_path, &state.data_dir).await;
             Ok(DownloadLink {
                 url,
                 filename: file.fname.clone(),
                 size: file.fsize,
-                headers: vec![
-                    ("Cookie".into(), cookie),
-                    ("User-Agent".into(), baidu::UA_NETDISK.into()),
-                ],
+                headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
             })

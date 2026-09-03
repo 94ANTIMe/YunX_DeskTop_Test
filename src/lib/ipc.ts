@@ -18,6 +18,12 @@ export interface Settings {
   downloadMinSplitMb: number;
   downloadConnPerServer: number;
   pansouBaseUrl: string;
+  /** 百度网盘加速通道（百度分享高速下载）：开关 */
+  baiduSpeedEnabled: boolean;
+  /** 加速通道服务地址；空 = 默认服务 */
+  baiduSpeedBaseUrl: string;
+  /** 加速通道解析码（失效时自动更新） */
+  baiduSpeedPassword: string;
   darkMode: number;
   autoCheckUpdate: boolean;
   clipboardMonitor: boolean;
@@ -48,6 +54,9 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadMinSplitMb: 4,
   downloadConnPerServer: 16,
   pansouBaseUrl: "",
+  baiduSpeedEnabled: false,
+  baiduSpeedBaseUrl: "",
+  baiduSpeedPassword: "",
   darkMode: 0,
   autoCheckUpdate: true,
   clipboardMonitor: false,

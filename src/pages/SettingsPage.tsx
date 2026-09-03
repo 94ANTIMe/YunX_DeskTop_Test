@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, Loader2, Minimize2, Power, RefreshCw, Search, ShieldCheck, Wifi } from "lucide-react";
+import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, KeyRound, Loader2, Minimize2, Power, RefreshCw, Search, ShieldCheck, Wifi, Zap } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
 import { useUpdate } from "../hooks/useUpdate";
@@ -59,6 +59,11 @@ const ACKNOWLEDGEMENTS = [
     name: "aria2",
     role: "多线程高速下载引擎（sidecar）",
     url: "https://github.com/aria2/aria2",
+  },
+  {
+    name: "BaiduPCS-Go",
+    role: "百度网盘直链取链 / 分享转存参考（sidecar 集成）",
+    url: "https://github.com/qjfoidnh/BaiduPCS-Go",
   },
   {
     name: "PanSou",
@@ -528,6 +533,72 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                 </div>
                 <p className="text-[11px] text-ink-soft/70">
                   代理地址变更即时写入下载引擎；若为限制式代理建议同时开启「重新启动引擎」使 aria2 全量走代理。
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* 百度网盘加速通道 */}
+      {s && (
+        <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "142ms" }}>
+          <div className="flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <Zap size={15} className="text-clay" strokeWidth={1.8} />
+              百度网盘加速
+            </h3>
+            {saving && <Loader2 size={14} className="animate-spin text-clay" />}
+          </div>
+          <div className="mt-2 divide-y divide-ink/10">
+            <ToggleRow
+              icon={Zap}
+              title="启用网盘加速"
+              desc="百度分享走高速下载通道（约 5-8 MB/s），通道不可用时自动回退官方链路；需已登录百度网盘"
+              checked={s.baiduSpeedEnabled}
+              onChange={(v) => persist({ ...s, baiduSpeedEnabled: v })}
+            />
+            {s.baiduSpeedEnabled && (
+              <div className="space-y-3 pt-3">
+                <div className="flex items-center gap-2">
+                  <Globe size={14} className="shrink-0 text-ink-soft" />
+                  <input
+                    type="text"
+                    defaultValue={s.baiduSpeedBaseUrl}
+                    key={s.baiduSpeedBaseUrl}
+                    placeholder="服务地址（可留空）"
+                    spellCheck={false}
+                    onBlur={(e) => {
+                      const v = e.currentTarget.value.trim().replace(/\/+$/, "");
+                      if (v !== s.baiduSpeedBaseUrl) persist({ ...s, baiduSpeedBaseUrl: v });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    }}
+                    className="h-9 flex-1 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <KeyRound size={14} className="shrink-0 text-ink-soft" />
+                  <input
+                    type="text"
+                    defaultValue={s.baiduSpeedPassword}
+                    key={s.baiduSpeedPassword}
+                    placeholder="解析码（留空自动获取）"
+                    spellCheck={false}
+                    onBlur={(e) => {
+                      if (e.currentTarget.value.trim() !== s.baiduSpeedPassword) {
+                        persist({ ...s, baiduSpeedPassword: e.currentTarget.value.trim() });
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    }}
+                    className="h-9 flex-1 rounded-ctrl border border-ink/10 bg-carrier-deep px-3 font-mono text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"
+                  />
+                </div>
+                <p className="text-[11px] text-ink-soft/70">
+                  解析码定期更换；留空或失效时自动从更新数据获取（存于缓存目录），无需手动维护。
                 </p>
               </div>
             )}

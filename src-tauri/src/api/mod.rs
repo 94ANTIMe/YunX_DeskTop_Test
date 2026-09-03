@@ -4,6 +4,7 @@ pub mod c139;
 pub mod pan123;
 pub mod pansou;
 pub mod quark;
+pub mod baidaccel;
 pub mod uc;
 pub mod xunlei;
 

@@ -145,6 +145,16 @@ pub struct Settings {
     pub download_conn_per_server: i32,
     /// PanSou 自部署搜索服务地址（如 http://192.168.1.100:8888）；空 = 未配置
     pub pansou_base_url: String,
+    /// 百度网盘加速通道（百度分享高速下载）：开关
+    /// 兼容旧版字段名 shanlianEnabled → baiduSpeedEnabled
+    #[serde(alias = "shanlianEnabled")]
+    pub baidu_speed_enabled: bool,
+    /// 加速通道服务地址；空 = 默认服务（兼容旧字段名 shanlianBaseUrl）
+    #[serde(alias = "shanlianBaseUrl")]
+    pub baidu_speed_base_url: String,
+    /// 加速通道解析码（失效时自动更新；兼容旧字段名 shanlianPassword）
+    #[serde(alias = "shanlianPassword")]
+    pub baidu_speed_password: String,
     /// 深色模式：0 跟随系统 / 1 浅色 / 2 深色
     pub dark_mode: i32,
     /// 启动时自动检查在线更新（GitHub Releases）
@@ -185,6 +195,9 @@ impl Default for Settings {
             download_min_split_mb: 4,
             download_conn_per_server: 16,
             pansou_base_url: String::new(),
+            baidu_speed_enabled: false,
+            baidu_speed_base_url: String::new(),
+            baidu_speed_password: String::new(),
             dark_mode: 0,
             auto_check_update: true,
             clipboard_monitor: false,

@@ -1,5 +1,6 @@
 mod api;
 mod aria2;
+mod baidupcs;
 mod clipboard;
 mod commands;
 mod crypto;
@@ -18,6 +19,7 @@ mod update;
 mod live_tests;
 
 use tauri::Manager;
+use tauri_plugin_shell::ShellExt;
 
 use state::AppState;
 
@@ -36,6 +38,13 @@ pub fn run() {
             // 应用数据目录（%APPDATA%\com.yunx.desktop）初始化 SQLite + 设置 + 迅雷指纹
             let data_dir = app.path().app_data_dir()?;
             app.manage(AppState::new(&data_dir)?);
+
+            // 解析 BaiduPCS-Go sidecar 路径（百度取链模块启动子进程时使用）
+            if let Ok(cmd) = app.shell().sidecar("baidupcs") {
+                let path: std::path::PathBuf =
+                    std::process::Command::from(cmd).get_program().into();
+                baidupcs::init_sidecar(path);
+            }
 
             // 系统托盘（常驻后台入口）
             let _ = tray::build(app.handle());
