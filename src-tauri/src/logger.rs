@@ -1,6 +1,7 @@
 //! 应用日志（app_log 表持久化；收集/取链/下载/登录全链路埋点）。
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::AppResult;
 
@@ -8,6 +9,9 @@ use crate::error::AppResult;
 pub const INFO: &str = "info";
 pub const SUCCESS: &str = "success";
 pub const ERROR: &str = "error";
+
+/// 容量裁剪计数器：每写 ~200 条执行一次裁剪，替代每条日志附带一条全表 DELETE
+static TRIM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,11 +42,13 @@ pub fn add(
         "INSERT INTO app_log (time, level, platform, action, message, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![now, level, platform, action, message, detail],
     )?;
-    // 容量控制：保留最近 2000 条
-    conn.execute(
-        "DELETE FROM app_log WHERE id < (SELECT MIN(id) FROM (SELECT id FROM app_log ORDER BY id DESC LIMIT 2000))",
-        [],
-    )?;
+    // 容量控制：保留最近 2000 条（每 200 条裁剪一次，降低持锁写开销）
+    if TRIM_COUNTER.fetch_add(1, Ordering::Relaxed) % 200 == 0 {
+        conn.execute(
+            "DELETE FROM app_log WHERE id < (SELECT MIN(id) FROM (SELECT id FROM app_log ORDER BY id DESC LIMIT 2000))",
+            [],
+        )?;
+    }
     Ok(())
 }
 

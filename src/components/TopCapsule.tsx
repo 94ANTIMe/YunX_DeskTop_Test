@@ -40,7 +40,7 @@ export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hi
             aria-current={active ? "page" : undefined}
             className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-colors ${
               active
-                ? "bg-clay text-white"
+                ? "bg-clay text-on-accent"
                 : "text-ink-soft hover:bg-carrier-deep hover:text-ink"
             }`}
           >

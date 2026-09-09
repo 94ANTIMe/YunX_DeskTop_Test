@@ -12,7 +12,7 @@ fn active_keys_map(app: &AppHandle) -> std::collections::BTreeMap<String, String
 
 /// 列出 6 平台账号状态
 #[tauri::command]
-pub fn list_accounts(app: AppHandle) -> AppResult<Vec<AccountSummary>> {
+pub async fn list_accounts(app: AppHandle) -> AppResult<Vec<AccountSummary>> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     crate::db::accounts::list_summaries(&conn, &active_keys_map(&app))
@@ -20,7 +20,7 @@ pub fn list_accounts(app: AppHandle) -> AppResult<Vec<AccountSummary>> {
 
 /// 平台账号列表（多账号切换下拉；active = 当前选中）
 #[tauri::command]
-pub fn list_account_rows(app: AppHandle, platform: String) -> AppResult<Vec<AccountRow>> {
+pub async fn list_account_rows(app: AppHandle, platform: String) -> AppResult<Vec<AccountRow>> {
     let state = app.state::<AppState>();
     let platform = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
@@ -30,7 +30,7 @@ pub fn list_account_rows(app: AppHandle, platform: String) -> AppResult<Vec<Acco
 
 /// 切换平台当前选中账号（解析/下载走新账号）
 #[tauri::command]
-pub fn switch_account(app: AppHandle, platform: String, key: String) -> AppResult<()> {
+pub async fn switch_account(app: AppHandle, platform: String, key: String) -> AppResult<()> {
     let state = app.state::<AppState>();
     let platform = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
@@ -47,7 +47,7 @@ pub fn switch_account(app: AppHandle, platform: String, key: String) -> AppResul
 /// 登出平台账号（默认登出当前选中账号；key 指定时可登出任意行）
 /// 同时清空该平台登录窗口的 WebView2 Cookie，避免自动回登
 #[tauri::command]
-pub fn logout(app: AppHandle, platform: String, key: String) -> AppResult<()> {
+pub async fn logout(app: AppHandle, platform: String, key: String) -> AppResult<()> {
     let state = app.state::<AppState>();
     let platform = Platform::from_key(&platform).ok_or_else(|| AppError::Api("未知平台".into()))?;
     let target = if key.is_empty() { state.active_account_key(&platform) } else { key };

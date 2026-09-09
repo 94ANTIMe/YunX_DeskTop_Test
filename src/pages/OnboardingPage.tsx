@@ -110,7 +110,7 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
             </ul>
             <button
               onClick={() => setStep(1)}
-              className="mx-auto mt-8 flex items-center gap-1.5 rounded-ctrl bg-clay px-6 py-2 text-sm font-semibold text-white transition-colors hover:bg-clay-deep"
+              className="mx-auto mt-8 flex items-center gap-1.5 rounded-ctrl bg-clay px-6 py-2 text-sm font-semibold text-on-accent transition-colors hover:bg-clay-deep"
             >
               开始配置
               <ArrowRight size={14} />
@@ -166,7 +166,7 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
                   测试连通性
                 </button>
                 {testResult && (
-                  <span className={`truncate text-xs ${testResult.ok ? "text-cactus" : "text-clay-deep"}`}>
+                  <span className={`truncate text-xs ${testResult.ok ? "text-success" : "text-danger"}`}>
                     {testResult.ok
                       ? `服务正常 · ${testResult.ms}ms`
                       : `连接失败：${testResult.error}`}
@@ -220,7 +220,7 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
                 <button
                   onClick={saveAndFinish}
                   disabled={saving}
-                  className="flex items-center gap-1.5 rounded-ctrl bg-clay px-6 py-2 text-sm font-semibold text-white transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-ctrl bg-clay px-6 py-2 text-sm font-semibold text-on-accent transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
                 >
                   {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                   完成
@@ -233,8 +233,8 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
         {/* 步骤 2：完成（瞬间过渡） */}
         {step === 2 && (
           <section className="animate-rise rounded-card bg-carrier p-8 text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-cactus/20">
-              <Check size={26} className="text-cactus" strokeWidth={2.2} />
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-success/15">
+              <Check size={26} className="text-success" strokeWidth={2.2} />
             </div>
             <h2 className="mt-4 font-display text-2xl font-semibold text-ink">配置完成</h2>
             <p className="mt-2 text-sm text-ink-soft">开始使用云析吧，祝下载愉快。</p>

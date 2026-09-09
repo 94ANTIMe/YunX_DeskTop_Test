@@ -9,6 +9,7 @@ import {
   FolderOpen,
   FolderTree,
   History,
+  Layers,
   Link2,
   Loader2,
   Sparkles,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
+import BatchQueuePanel from "../components/BatchQueuePanel";
 import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
@@ -42,11 +44,24 @@ interface TreeNode {
   expanded: boolean;
   loading: boolean;
   children?: TreeNode[];
+  hasMore?: boolean;
+  path: DirStackEntry[];
+  file?: ShareFile;
 }
 
 /** ShareFile → 树节点 */
-function toTreeNode(f: ShareFile): TreeNode {
-  return { fid: f.fid, name: f.fname, isdir: f.isdir, fsize: f.fsize, expanded: false, loading: false, children: undefined };
+function toTreeNode(f: ShareFile, parentPath: DirStackEntry[]): TreeNode {
+  return {
+    fid: f.fid,
+    name: f.fname,
+    isdir: f.isdir,
+    fsize: f.fsize,
+    expanded: false,
+    loading: false,
+    children: undefined,
+    path: [...parentPath, { fid: f.fid, name: f.fname }],
+    file: f,
+  };
 }
 
 /** 按 fid 不可变更新树（命中节点应用 patch，其余原样传递） */
@@ -56,6 +71,11 @@ function updateTree(nodes: TreeNode[], fid: string, patch: Partial<TreeNode>): T
     if (n.children) return { ...n, children: updateTree(n.children, fid, patch) };
     return n;
   });
+}
+
+function updateTreeRoot(root: TreeNode, fid: string, patch: Partial<TreeNode>): TreeNode {
+  if (root.fid === fid) return { ...root, ...patch };
+  return { ...root, children: updateTree(root.children ?? [], fid, patch) };
 }
 
 /** 解析页：粘贴链接 → 建会话 → 文件树导航 → 取链入队下载 + 收藏 */
@@ -84,6 +104,8 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [treeRoot, setTreeRoot] = useState<TreeNode | null>(null);
   const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  /** 批量链接队列面板 */
+  const [showBatch, setShowBatch] = useState(false);
   const noticeTimer = useRef<number | undefined>(undefined);
 
   const showNotice = (msg: string) => {
@@ -122,13 +144,13 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   }
 
   // 解析（text 缺省取输入框内容；搜索页转入时传「链接 + 提取码」组合文本）
-  async function resolve(text?: string) {
+  async function resolve(text?: string, pwdOverride?: string) {
     const t = (text ?? input).trim();
     if (!t || resolving) return;
     setResolving(true);
     setError("");
     try {
-      const info = await ipc.resolveShare(t);
+      const info = await ipc.resolveShare(t, (pwdOverride ?? pwd).trim() || undefined);
       setSession(info);
       setFiles(info.files);
       setHasMore(info.hasMore);
@@ -141,7 +163,9 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
         fsize: 0,
         expanded: true,
         loading: false,
-        children: info.files.map(toTreeNode),
+        path: [{ fid: "0", name: info.title || "根目录" }],
+        hasMore: info.hasMore,
+        children: info.files.map((file) => toTreeNode(file, [{ fid: "0", name: info.title || "根目录" }])),
       });
       setPage(1);
       if (info.title) showNotice(`已解析：${info.title}`);
@@ -161,8 +185,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     setInput(link);
     setPwd(pending.pwd);
     onPendingConsumed?.();
-    const text = pending.pwd ? `${link} 提取码：${pending.pwd}` : link;
-    resolve(text);
+    void resolve(link, pending.pwd);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending]);
 
@@ -223,43 +246,49 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     }
   }
 
-  // 目录树：文件夹展开/跳转（点击目录即在主列表导航进入）
-  async function jumpTree(node: TreeNode) {
-    if (!session || node.loading) return;
-    // 已展开 → 折叠；未展开 → 懒加载子目录
-    if (node.expanded && node.children) {
-      setTreeRoot((r) => (r ? { ...r, children: updateTree(r.children ?? [], node.fid, { expanded: false }) } : r));
-      return;
-    }
+  async function loadTreeChildren(node: TreeNode): Promise<{ files: ShareFile[]; hasMore: boolean } | null> {
+    if (!session || node.loading) return null;
     setTreeRoot((r) =>
-      r ? { ...r, children: updateTree(r.children ?? [], node.fid, { loading: true }) } : r
+      r ? updateTreeRoot(r, node.fid, { loading: true }) : r
     );
     try {
       const res = await ipc.listShareFiles(session.sessionKey, node.fid, 1);
       setTreeRoot((r) =>
         r
-          ? {
-              ...r,
-              children: updateTree(r.children ?? [], node.fid, {
-                expanded: true,
-                loading: false,
-                children: res.files.map(toTreeNode),
-              }),
-            }
+          ? updateTreeRoot(r, node.fid, {
+              expanded: true,
+              loading: false,
+              hasMore: res.hasMore,
+              children: res.files.map((file) => toTreeNode(file, node.path)),
+            })
           : r
       );
+      return res;
     } catch (e) {
       setError(errMsg(e));
-      setTreeRoot((r) => (r ? { ...r, children: updateTree(r.children ?? [], node.fid, { loading: false }) } : r));
+      setTreeRoot((r) => (r ? updateTreeRoot(r, node.fid, { loading: false }) : r));
+      return null;
+    }
+  }
+
+  async function toggleTree(node: TreeNode) {
+    if (!node.isdir) return;
+    if (node.children) {
+      setTreeRoot((root) => root ? updateTreeRoot(root, node.fid, { expanded: !node.expanded }) : root);
       return;
     }
-    // 同步主文件列表导航到该目录
+    await loadTreeChildren(node);
+  }
+
+  async function enterTree(node: TreeNode) {
+    if (!session || !node.isdir || loadingDir) return;
     setLoadingDir(true);
     try {
-      const result = await ipc.listShareFiles(session.sessionKey, node.fid, 1);
+      const result = node.children ? { files: node.children.flatMap((child) => child.file ? [child.file] : []), hasMore: node.hasMore ?? false } : await loadTreeChildren(node);
+      if (!result) return;
       setFiles(result.files);
       setHasMore(result.hasMore);
-      setDirStack((s) => [...s, { fid: node.fid, name: node.name }]);
+      setDirStack(node.path);
       setPage(1);
     } catch (e) {
       setError(errMsg(e));
@@ -273,20 +302,17 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     const indent = depth * 14;
     return (
       <li key={node.fid} className="py-0.5">
-        <button
-          onClick={() => node.isdir && jumpTree(node)}
+        <div
           className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left transition-colors hover:bg-carrier-deep"
           style={{ paddingLeft: 8 + indent }}
-          title={node.isdir ? "展开 / 进入" : node.name}
         >
           {node.isdir ? (
             node.loading ? (
               <Loader2 size={12} className="shrink-0 animate-spin text-clay" />
             ) : (
-              <ChevronRight
-                size={12}
-                className={`shrink-0 text-ink-soft transition-transform ${node.expanded ? "rotate-90" : ""}`}
-              />
+              <button onClick={() => void toggleTree(node)} aria-label={node.expanded ? "折叠目录" : "展开目录"} className="shrink-0 rounded p-0.5">
+                <ChevronRight size={12} className={`text-ink-soft transition-transform ${node.expanded ? "rotate-90" : ""}`} />
+              </button>
             )
           ) : (
             <span className="w-3 shrink-0" />
@@ -296,11 +322,15 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           ) : (
             <FileText size={14} className="shrink-0 text-ink-soft" />
           )}
-          <span className="min-w-0 flex-1 truncate text-xs text-ink">{node.name}</span>
+          {node.isdir ? (
+            <button onClick={() => void enterTree(node)} className="min-w-0 flex-1 truncate text-left text-xs text-ink" title={`进入 ${node.name}`}>{node.name}</button>
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-xs text-ink">{node.name}</span>
+          )}
           {!node.isdir && (
             <span className="shrink-0 font-mono text-[10px] text-ink-soft/70">{formatBytes(node.fsize)}</span>
           )}
-        </button>
+        </div>
         {node.expanded && node.children && <ul>{node.children.map((c) => renderTree(c, depth + 1))}</ul>}
       </li>
     );
@@ -467,6 +497,14 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             <History size={14} />
             解析记录
           </button>
+          <button
+            onClick={() => setShowBatch(true)}
+            className="flex items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay hover:text-clay-deep"
+            title="批量粘贴多条链接，串行解析并一键入队下载"
+          >
+            <Layers size={14} />
+            批量队列
+          </button>
         </div>
       </PageHeader>
 
@@ -515,7 +553,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
               <button
                 onClick={() => resolve()}
                 disabled={!input.trim() || resolving}
-                className="flex items-center gap-2 rounded-ctrl bg-clay px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+                className="flex items-center gap-2 rounded-ctrl bg-clay px-5 py-2 text-sm font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
               >
                 {resolving ? <Loader2 size={15} className="animate-spin" /> : <Link2 size={15} />}
                 {resolving ? "解析中…" : "解析"}
@@ -551,10 +589,10 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
         </div>
       )}
       {error && (
-        <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</div>
+        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
       {notice && (
-        <div className="rounded-ctrl bg-cactus/25 px-4 py-2.5 text-sm text-ink">{notice}</div>
+        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</div>
       )}
 
       {/* 解析结果：面包屑 + 文件列表 */}
@@ -573,7 +611,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             <div className="min-w-0 flex-1">
           {/* 面包屑 */}
           <div className="flex flex-wrap items-center gap-1 border-b border-ink/10 pb-4">
-            <span className="rounded-full bg-clay px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-widest text-white">
+            <span className="rounded-full bg-clay px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-widest text-on-accent">
               {platformLabel(session.platform)}
             </span>
             {dirStack.map((entry, i) => (
@@ -652,7 +690,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                   <button
                     onClick={() => (file.isdir ? downloadFolder(file) : downloadFile(file))}
                     disabled={downloadingFid !== null || folderBusy !== null}
-                    className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+                    className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay px-3 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
                   >
                     {file.isdir ? (
                       folderBusy === file.fid ? <Loader2 size={13} className="animate-spin" /> : <ArrowDownToLine size={13} />
@@ -726,7 +764,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                           setInput(b.link);
                           setPwd(b.pwd);
                         }}
-                        className="shrink-0 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-white hover:bg-clay-deep"
+                        className="shrink-0 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-on-accent hover:bg-clay-deep"
                       >
                         解析
                       </button>
@@ -798,7 +836,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                           setInput(h.link);
                           setPwd("");
                         }}
-                        className="shrink-0 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-white hover:bg-clay-deep"
+                        className="shrink-0 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-on-accent hover:bg-clay-deep"
                       >
                         再解析
                       </button>
@@ -817,6 +855,13 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           </div>
         </div>
       )}
+
+      {/* 批量链接队列抽屉 */}
+      <BatchQueuePanel
+        open={showBatch}
+        onClose={() => setShowBatch(false)}
+        onGoDownload={() => onNavigate("download")}
+      />
 
       {/* 跨网盘搜同款弹窗 */}
       <CrossDriveSearchModal

@@ -46,7 +46,7 @@ export default function ClipboardPrompt({ share, onResolve, onDismiss }: Clipboa
       <div className="mt-3 flex justify-end">
         <button
           onClick={() => onResolve(share.text, share.parsed.pwd)}
-          className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-clay-deep"
+          className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep"
         >
           去解析
           <ArrowRight size={14} />

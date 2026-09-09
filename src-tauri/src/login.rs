@@ -196,10 +196,14 @@ async fn validate_and_save(state: &AppState, platform: Platform, cookie: &str) -
 
 /// 新账号登录保存：以独立新行入库（多账号），并写为当前选中账号；返回 key
 fn set_xunlei_new_account(state: &AppState, nickname: &str) -> Option<String> {
-    let rt = state.xunlei.lock().ok()?;
-    if rt.access_token.is_empty() {
-        return None;
-    }
+    // 快照运行时后立即释放 xunlei 锁：DB 写不再嵌套在 xunlei 锁内（消除 ABBA 死锁隐患）
+    let snapshot = {
+        let rt = state.xunlei.lock().ok()?;
+        if rt.access_token.is_empty() {
+            return None;
+        }
+        (rt.access_token.clone(), rt.refresh_token.clone(), rt.fp.device_id.clone(), rt.captcha_token.clone())
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -208,10 +212,10 @@ fn set_xunlei_new_account(state: &AppState, nickname: &str) -> Option<String> {
     let key = accounts::save(
         &conn,
         &Account::Xunlei {
-            access_token: rt.access_token.clone(),
-            refresh_token: rt.refresh_token.clone(),
-            device_id: rt.fp.device_id.clone(),
-            captcha_token: rt.captcha_token.clone(),
+            access_token: snapshot.0,
+            refresh_token: snapshot.1,
+            device_id: snapshot.2,
+            captcha_token: snapshot.3,
             nickname: nickname.to_string(),
         },
         now,

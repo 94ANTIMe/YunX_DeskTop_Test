@@ -128,7 +128,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
       <PageHeader tab="drive" subtitle="登录网盘账号后即可解析对应平台分享并高速下载" />
 
       {error && (
-        <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</div>
+        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
 
       {/* hero 插画带 */}
@@ -162,7 +162,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                 {/* 登录态：实心点 */}
                 <span
                   className={`mt-1 h-2 w-2 rounded-full ${
-                    acc?.loggedIn ? "bg-cactus" : "border border-ink-soft/40"
+                    acc?.loggedIn ? "bg-success" : "border border-ink-soft/40"
                   }`}
                 />
               </div>
@@ -193,28 +193,29 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                           <p className="px-3 py-2.5 text-xs text-ink-soft/70">暂无其他账号</p>
                         )}
                         {rows[p.id]?.map((row) => (
-                          <button
+                          <div
                             key={row.key}
-                            onClick={() => switchTo(p.id, row.key)}
-                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-ivory ${
+                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-ivory ${
                               row.active ? "bg-ivory text-ink" : "text-ink-soft"
                             }`}
                           >
-                            <span className="min-w-0 flex-1 truncate">{row.nickname || "已登录"}</span>
+                            <button
+                              onClick={() => switchTo(p.id, row.key)}
+                              className="min-w-0 flex-1 truncate py-0.5 text-left"
+                            >
+                              {row.nickname || "已登录"}
+                            </button>
                             {row.active && <Check size={13} className="shrink-0 text-clay" />}
                             {!row.active && (
                               <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  logout(p.id, row.key);
-                                }}
+                                onClick={() => logout(p.id, row.key)}
                                 className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-ink-soft/70 hover:bg-clay/10 hover:text-clay-deep"
                                 title="退出该账号"
                               >
                                 退
                               </button>
                             )}
-                          </button>
+                          </div>
                         ))}
                       </div>
                     )}
@@ -233,7 +234,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                 {acc?.loggedIn && ["baidu", "quark", "pan123"].includes(p.id) && (
                   <button
                     onClick={() => setActiveFileManager({ platform: p.id, nickname: acc.nickname || "" })}
-                    className="flex shrink-0 items-center gap-1 rounded-ctrl bg-clay/10 text-clay-deep border border-clay/30 px-3 py-1.5 text-xs font-semibold hover:bg-clay hover:text-white transition-colors"
+                    className="flex shrink-0 items-center gap-1 rounded-ctrl bg-clay/10 text-clay-deep border border-clay/30 px-3 py-1.5 text-xs font-semibold hover:bg-clay hover:text-on-accent transition-colors"
                     title="浏览该网盘个人文件并一键直链下载"
                   >
                     <FolderOpen size={12} />
@@ -251,7 +252,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                 ) : (
                   <button
                     onClick={() => setLoginPlatform(p.id)}
-                    className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-clay-deep"
+                    className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay px-3.5 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep"
                   >
                     <LogIn size={13} />
                     登录

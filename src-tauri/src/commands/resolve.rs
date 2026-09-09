@@ -15,9 +15,9 @@ pub fn parse_share_link(text: String) -> AppResult<ParsedShare> {
 
 /// 建立解析会话并返回首页文件列表
 #[tauri::command]
-pub async fn resolve_share(app: AppHandle, text: String) -> AppResult<ResolveSessionInfo> {
+pub async fn resolve_share(app: AppHandle, text: String, pwd_override: Option<String>) -> AppResult<ResolveSessionInfo> {
     let state = app.state::<AppState>();
-    let result = crate::resolve::resolve_share(&state, &text).await;
+    let result = crate::resolve::resolve_share(&state, &text, pwd_override.as_deref()).await;
     if let Ok(info) = &result {
         // 记录解析历史（供解析页展示/删除）
         crate::commands::history::record_resolve(&app, &text, &info.platform, &info.title);
@@ -117,7 +117,7 @@ pub fn validate_session(app: AppHandle, session_key: String) -> AppResult<bool> 
 
 /// 查询日志（level: "success" / "error" / "info" / 空 = 全部）
 #[tauri::command]
-pub fn list_logs(app: AppHandle, level: Option<String>, limit: Option<i64>) -> AppResult<Vec<logger::LogRow>> {
+pub async fn list_logs(app: AppHandle, level: Option<String>, limit: Option<i64>) -> AppResult<Vec<logger::LogRow>> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     logger::list(&conn, level.as_deref(), limit.unwrap_or(500))
@@ -125,7 +125,7 @@ pub fn list_logs(app: AppHandle, level: Option<String>, limit: Option<i64>) -> A
 
 /// 清空日志
 #[tauri::command]
-pub fn clear_logs(app: AppHandle) -> AppResult<()> {
+pub async fn clear_logs(app: AppHandle) -> AppResult<()> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     logger::clear(&conn)

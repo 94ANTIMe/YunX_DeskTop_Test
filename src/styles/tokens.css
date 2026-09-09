@@ -3,17 +3,35 @@
 /* 深色模式：class 策略（useTheme 切换 html.dark） */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * ── 语义 token 层 ─────────────────────────────────────────────────────────
+ * 配色主题（src/lib/themes.ts，七套）在运行时把语义变量（--app-bg 等）注入
+ * documentElement；下方 :root / .dark 仅是暖色主题的静态兜底（JS 生效前的首帧）。
+ * 新增主题只需在 themes.ts 补注册项与 token，不改本文件、不改页面组件。
+ *
+ * 兼容层：现有 Tailwind 颜色工具类名（bg-ivory / text-ink / bg-clay …）原样保留，
+ * 经 @theme 别名映射到语义层；业务组件禁止直接写死主题色 hex。
+ */
+
 @theme {
-  /* ── 暖色编辑风调色板（与 anthropic-art 插画同语言：单一 clay 强调家族）── */
-  --color-ivory: #faf9f5; /* 页面底 */
-  --color-carrier: #f0eee6; /* 一级承载面（卡片） */
-  --color-carrier-deep: #e8e6dc; /* 二级承载面（输入框 / 嵌套面板） */
-  --color-oat: #e3dacc; /* 侧栏底 / 选中态底 */
-  --color-ink: #141413; /* 主文字 / 线条 */
-  --color-ink-soft: #55524a; /* 次级文字 */
-  --color-clay: #d97757; /* 主强调：按钮 / 选中 / 进度 */
-  --color-clay-deep: #c05f41; /* hover / 按下 */
-  --color-cactus: #bcd1ca; /* 点缀：成功 / 在线 */
+  /* ── 语义 → Tailwind 新工具类 ── */
+  --color-on-accent: var(--on-accent); /* 强调色（按钮）上的文字 */
+  --color-on-danger: var(--on-danger); /* 错误（危险按钮）上的文字，不随主题变化 */
+  --color-accent-soft: var(--accent-soft); /* 低饱和强调底 */
+  --color-success: var(--status-success);
+  --color-warning: var(--status-warning);
+  --color-danger: var(--status-error);
+
+  /* ── 兼容旧 token 名（既有页面类名零改动） ── */
+  --color-ivory: var(--app-bg); /* 页面底 */
+  --color-carrier: var(--surface-card); /* 一级承载面（卡片） */
+  --color-carrier-deep: var(--surface-input); /* 二级承载面（输入框 / 嵌套面板） */
+  --color-oat: var(--surface-muted); /* 侧栏底 / 选中态底 */
+  --color-ink: var(--text-primary); /* 主文字 / 线条（ink/N 同时承担弱边框） */
+  --color-ink-soft: var(--text-secondary); /* 次级文字 */
+  --color-clay: var(--accent); /* 主强调：按钮 / 选中 / 进度 */
+  --color-clay-deep: var(--accent-strong); /* hover / 按下 */
+  --color-cactus: var(--accent-decor); /* 点缀：装饰（语义成功请用 text-success） */
 
   /* ── 字体：衬线 display + 系统中文正文 + mono 数字 ── */
   --font-display: "Fraunces Variable", "Microsoft YaHei UI", serif;
@@ -28,21 +46,56 @@
   --animate-page-in: page-in 240ms ease-out both;
   --animate-rise: rise 360ms ease-out both;
   --animate-drop: drop 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-drawer-in: drawer-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-drawer-out: drawer-out 220ms ease-in both;
+  --animate-fade: fade 200ms ease-out both;
 
   /* ── 顶部悬浮胶囊投影 ── */
   --shadow-capsule: 0 8px 28px rgba(20, 20, 19, 0.08);
 }
 
-/* 暖墨深色：象牙 ↔ 墨色互换，clay 家族保持 */
+/* 暖色编辑风静态兜底（= warm-editorial light；useTheme 注入内联变量后即被覆盖） */
+:root {
+  --on-danger: #ffffff; /* 白字用于浅色错误底（各主题错误色统一，非主题变量） */
+  --app-bg: #faf9f5;
+  --surface-card: #f0eee6;
+  --surface-input: #e8e6dc;
+  --surface-muted: #e3dacc;
+  --text-primary: #141413;
+  --text-secondary: #55524a;
+  --border-soft: #dedacd;
+  --border-strong: #c8c3b1;
+  --accent: #d97757;
+  --accent-strong: #c05f41;
+  --accent-soft: #f2e0d7;
+  --accent-decor: #bcd1ca;
+  --on-accent: #ffffff;
+  --focus-ring: #c05f41;
+  --status-success: #2f6b4f;
+  --status-warning: #a16207;
+  --status-error: #d92d20;
+}
+
+/* 暖墨深色兜底（= warm-editorial dark） */
 .dark {
-  --color-ivory: #1f1e1b;
-  --color-carrier: #2a2824;
-  --color-carrier-deep: #333029;
-  --color-oat: #26241f;
-  --color-ink: #faf9f5;
-  --color-ink-soft: #a8a29a;
-  --color-clay-deep: #e08a6b;
-  --color-cactus: #7fa393;
+  --on-danger: #141413; /* 深色错误底（亮红）配深字 */
+  --app-bg: #1f1e1b;
+  --surface-card: #2a2824;
+  --surface-input: #333029;
+  --surface-muted: #26241f;
+  --text-primary: #faf9f5;
+  --text-secondary: #a8a29a;
+  --border-soft: #3a372f;
+  --border-strong: #4b463b;
+  --accent: #d97757;
+  --accent-strong: #e08a6b;
+  --accent-soft: #3c2c24;
+  --accent-decor: #7fa393;
+  --on-accent: #ffffff;
+  --focus-ring: #e08a6b;
+  --status-success: #63b58c;
+  --status-warning: #fbbf24;
+  --status-error: #f87171;
   --shadow-capsule: 0 8px 28px rgba(0, 0, 0, 0.35);
 }
 
@@ -79,6 +132,42 @@
   }
 }
 
+/* 抽屉：右侧滑入 / 沿同一路径滑出（空间一致性：来去同路） */
+@keyframes drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 减弱动态效果：滑入滑出退化为交叉淡入淡出 */
+@media (prefers-reduced-motion: reduce) {
+  .animate-drawer-in,
+  .animate-drawer-out {
+    animation: rise 200ms ease-out both !important;
+  }
+}
+
 @layer base {
   html,
   body,
@@ -86,24 +175,62 @@
     height: 100%;
   }
   body {
-    background-color: var(--color-ivory);
-    color: var(--color-ink);
+    background-color: var(--app-bg);
+    color: var(--text-primary);
     font-family: var(--font-body);
     -webkit-font-smoothing: antialiased;
   }
   ::selection {
-    background-color: var(--color-clay);
-    color: var(--color-ivory);
+    background-color: var(--accent);
+    color: var(--on-accent);
   }
   ::-webkit-scrollbar {
     width: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    background-color: var(--color-carrier-deep);
+    background-color: var(--surface-input);
     border-radius: 999px;
-    border: 2px solid var(--color-ivory);
+    border: 2px solid var(--app-bg);
   }
   ::-webkit-scrollbar-track {
     background: transparent;
+  }
+  /* 焦点环：键盘可达性（颜色来自主题 focus-ring token） */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+  /* 滑杆 / 进度等原生控件跟随主题强调色 */
+  input[type="range"] {
+    accent-color: var(--accent);
+  }
+}
+
+/* 原位折叠面板（设置页开源致谢）：200ms 展开 / 收起；
+   收起时 visibility:hidden 使内部链接退出键盘焦点顺序与可访问性树 */
+.collapse-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows 200ms ease,
+    visibility 0s linear 200ms;
+}
+.collapse-grid[data-open="true"] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition: grid-template-rows 200ms ease;
+}
+.collapse-grid > .collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .collapse-grid,
+  .collapse-grid[data-open="true"] {
+    transition: none;
+  }
+  .chevron-rotate {
+    transition: none !important;
   }
 }

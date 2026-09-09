@@ -12,11 +12,8 @@ mod models;
 mod parser;
 mod resolve;
 mod state;
+mod subscription;
 mod tray;
-mod update;
-
-#[cfg(test)]
-mod live_tests;
 
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
@@ -30,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -69,6 +67,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 clipboard::spawn(handle).await;
             });
+
+            // 订阅追剧调度器（定时 PanSou 搜索 + 自动解析下载，设置开关控制）
+            let handle = app.handle().clone();
+            subscription::spawn(handle);
 
             // 开机自启状态与设置对齐（幂等）
             let settings = app.state::<AppState>().load_settings();
@@ -131,9 +133,12 @@ pub fn run() {
             commands::history::list_resolve_history,
             commands::history::delete_resolve_history,
             commands::history::clear_resolve_history,
-            commands::update::check_update,
-            commands::update::download_update,
-            commands::update::install_update,
+            commands::stats::get_download_stats,
+            commands::subscription::list_subscriptions,
+            commands::subscription::add_subscription,
+            commands::subscription::update_subscription,
+            commands::subscription::remove_subscription,
+            commands::subscription::run_subscription_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

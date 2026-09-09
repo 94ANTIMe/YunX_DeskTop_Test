@@ -11,12 +11,16 @@
 - **多账号管理**：每个平台可登录多个账号并一键切换，凭据以 **Windows DPAPI 加密** 持久化
 - **高速下载**：aria2 分片并发下载，断点续传、限速、失败重试、代理支持
 - **网盘聚合搜索**：对接自部署 PanSou 服务，搜索公开分享资源并一键转入解析
+- **订阅追剧**：订阅关键词后定时聚合搜索、自动识别新集数（S01E02 / 第12集 / EP03 等）并解析下载，已下载集数不重复（借鉴 quark-auto-save）
+- **BT 加速**：磁力 / BT 下载，Tracker 列表每日自动更新（TrackersListCollection），可代理
+- **完成后动作**：全部任务完成后可自动关机（60 秒可取消）/ 睡眠
 - **下载任务管理**：任务级控制（暂停 / 继续 / 删除 / 打开位置、一键清空），Dashboard 明细视图与速度监控
 - **任务全貌**：并发数、分片数、限速、下载目录、每服务器连接数等均可配置
 - **剪贴板监听**：自动识别复制的分享链接并提示解析（可在设置开关）
 - **托盘常驻**：最小化到托盘后台继续下载，下载完成系统通知，可开机自启
 - **收藏夹与解析历史**：收藏常用链接，解析记录可回看、再解析、删除
-- **在线更新**：GitHub + GitCode 双源测速择优下载，静默安装覆盖并自动重启
+- **在线更新**：基于 Tauri Updater 检查 GitHub Releases（latest.json，签名校验），下载 NSIS 安装包后 passive 模式覆盖安装并自动重启
+- **七套配色主题**：明暗模式（跟随系统 / 浅色 / 深色）× 配色主题独立选择；状态色与强调色分离，对比度经测试强制
 - **日志系统**：解析 / 取链 / 下载全链路实时记录，便于排查
 
 ## 🛠️ 技术栈
@@ -38,6 +42,10 @@
 
 在「设置」页填入自部署 PanSou 服务根地址（如 `https://so.252035.xyz`）或本地地址 `http://192.168.1.100:8888`，即可在「搜索」页启用聚合搜索；留空则关闭。
 
+## 📐 项目规范
+
+面向开发者与 AI 的统一规范入口：[AGENTS.md](AGENTS.md)（必读入口与规范地图）、[CONTRIBUTING.md](CONTRIBUTING.md)（开发流程），详细规范见 [docs/project/](docs/project/)（架构 / 变更流程 / 接口兼容 / 主题扩展 / 异步资源 / 测试 / 发布 / 决策记录）。
+
 ## 🤝 开源致谢
 
 本项目依赖 / 参考了以下开源项目，谨此致谢；各项目版权归其作者所有。
@@ -45,6 +53,8 @@
 - [aria2](https://github.com/aria2/aria2) — 多线程高速下载引擎（sidecar）
 - [PanSou](https://github.com/fish2018/pansou) — 网盘聚合搜索 API 服务（自部署对接）
 - [TurboDL](https://github.com/henrique-coder/turbodl) — 多线程分片下载优化参考
+- [TrackersListCollection](https://github.com/XIU2/TrackersListCollection) — BT Tracker 每日更新列表数据源
+- [quark-auto-save](https://github.com/Cp0204/quark-auto-save) — 订阅追剧自动化思路参考
 - [YunX](https://github.com/CYQawa/YunX) — 云析 Android 版（同源项目）
 
 ## ⚠️ License Notice / 协议声明

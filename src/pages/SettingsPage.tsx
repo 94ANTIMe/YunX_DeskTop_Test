@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialogDir } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Bell, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, Loader2, Minimize2, Power, RefreshCw, Search, ShieldCheck, Wifi } from "lucide-react";
+import { Bell, Check, ChevronDown, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, Loader2, Magnet, Minimize2, Power, RefreshCw, Rss, Search, ShieldCheck, Wifi } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import { errMsg, ipc, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
+import { errMsg, ipc, onSettingsUpdated, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
 import { useUpdate } from "../hooks/useUpdate";
 import { formatBytes } from "../lib/format";
 import type { ThemeMode } from "../hooks/useTheme";
+import type { AppearancePatch } from "../hooks/useAppearance";
+import { COLOR_THEMES, type ColorTheme } from "../lib/themes";
 import type { TabId } from "../lib/tabs";
 import aboutHero from "../assets/art/about-lighthouse.jpg";
 
@@ -71,6 +73,11 @@ const ACKNOWLEDGEMENTS = [
     url: "https://github.com/fish2018/pansou",
   },
   {
+    name: "TrackersListCollection",
+    role: "BT Tracker 每日更新列表数据源（自动追更注入 aria2）",
+    url: "https://github.com/XIU2/TrackersListCollection",
+  },
+  {
     name: "TurboDL",
     role: "多线程分片下载优化参考",
     url: "https://github.com/henrique-coder/turbodl",
@@ -82,10 +89,10 @@ const ACKNOWLEDGEMENTS = [
   },
 ];
 
-const THEME_OPTIONS: { mode: ThemeMode; label: string; value: number }[] = [
-  { mode: "system", label: "跟随系统", value: 0 },
-  { mode: "light", label: "浅色", value: 1 },
-  { mode: "dark", label: "深色", value: 2 },
+const THEME_OPTIONS: { mode: ThemeMode; label: string }[] = [
+  { mode: "system", label: "跟随系统" },
+  { mode: "light", label: "浅色" },
+  { mode: "dark", label: "深色" },
 ];
 
 /** 限速选项（字节/秒） */
@@ -97,50 +104,214 @@ const SPEED_OPTIONS: { value: number; label: string }[] = [
   { value: 52_428_800, label: "50 MB/s" },
 ];
 
+/** 订阅检查间隔选项（分钟） */
+const SUB_INTERVAL_OPTIONS: { value: number; label: string }[] = [
+  { value: 30, label: "30 分钟" },
+  { value: 60, label: "1 小时" },
+  { value: 180, label: "3 小时" },
+  { value: 360, label: "6 小时" },
+  { value: 720, label: "12 小时" },
+  { value: 1440, label: "24 小时" },
+];
+
+/** 下载完成后动作选项 */
+const AFTER_ACTION_OPTIONS: { value: string; label: string }[] = [
+  { value: "none", label: "无（保持运行）" },
+  { value: "shutdown", label: "60 秒后关机" },
+  { value: "sleep", label: "进入睡眠" },
+];
+
 interface SettingsPageProps {
   themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
+  /** 当前配色主题 ID（由 App 持有并注入 documentElement） */
+  colorTheme: string;
+  /** 外观变更（明暗 / 配色）：App 即时预览并经共享队列持久化到 settings.json */
+  onAppearanceChange: (patch: AppearancePatch) => void;
   /** 跳转主 Tab（如「前往搜索」） */
   onNavigate?: (tab: TabId) => void;
 }
 
-/** 设置页：外观 / 下载（settings.json 持久化）/ 搜索服务 / 关于 */
-export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate }: SettingsPageProps) {
+/**
+ * 主题预览卡（七选一，radio 语义 + 方向键移动）。
+ * 迷你界面与双色样本直接用该主题自身 token 渲染（始终浅色基准），不随当前页面主题变化。
+ */
+function ThemeCard({
+  theme,
+  selected,
+  onSelect,
+}: {
+  theme: ColorTheme;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const t = theme.light;
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      aria-label={theme.name}
+      tabIndex={selected ? 0 : -1}
+      onClick={onSelect}
+      className={`relative rounded-card border p-3 text-left transition-colors ${
+        selected
+          ? "border-clay bg-accent-soft"
+          : "border-ink/10 bg-carrier-deep hover:border-ink/25"
+      }`}
+    >
+      {/* 迷你界面预览 */}
+      <span
+        aria-hidden
+        className="block h-14 w-full overflow-hidden rounded-ctrl border p-1.5"
+        style={{ backgroundColor: t["app-bg"], borderColor: t["border-soft"] }}
+      >
+        <span className="flex items-center gap-1">
+          <span className="h-2 w-6 rounded-full" style={{ backgroundColor: t.accent }} />
+          <span className="h-2 w-4 rounded-full" style={{ backgroundColor: t["border-strong"] }} />
+        </span>
+        <span className="mt-1.5 flex items-center gap-1">
+          <span className="h-4 w-9 rounded-[3px]" style={{ backgroundColor: t.accent }} />
+          <span className="h-4 w-9 rounded-[3px]" style={{ backgroundColor: t["accent-soft"] }} />
+          <span className="ml-auto h-4 w-4 rounded-[3px]" style={{ backgroundColor: t["accent-decor"] }} />
+        </span>
+        <span className="mt-1.5 block h-1.5 w-2/3 rounded-full" style={{ backgroundColor: t["text-secondary"], opacity: 0.55 }} />
+      </span>
+      {/* 双色样本（原始色值）+ 名称 + 选中标记 */}
+      <span className="mt-2.5 flex items-center gap-2">
+        <span className="flex shrink-0 -space-x-1">
+          <span className="h-4 w-4 rounded-full border-2 border-ivory" style={{ backgroundColor: theme.colorA }} />
+          <span className="h-4 w-4 rounded-full border-2 border-ivory" style={{ backgroundColor: theme.colorB }} />
+        </span>
+        <span className={`min-w-0 flex-1 truncate text-xs font-medium ${selected ? "text-ink" : "text-ink-soft"}`}>
+          {theme.name}
+        </span>
+        {selected && <Check size={14} className="shrink-0 text-clay" strokeWidth={2.4} aria-hidden />}
+      </span>
+    </button>
+  );
+}
+
+/** 设置页：外观（明暗 × 配色）/ 下载（settings.json 持久化）/ 搜索服务 / 关于 */
+export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange, onNavigate }: SettingsPageProps) {
   const [settings, setSettings] = useState<SettingsT | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const settingsRef = useRef<SettingsT | null>(null);
+  const saveInFlight = useRef(false);
+  const savePending = useRef(false);
   const [proxyTesting, setProxyTesting] = useState(false);
   const [proxyResult, setProxyResult] = useState<{ ok: boolean; ip?: string; latencyMs?: number; error?: string } | null>(null);
   const updater = useUpdate();
+  // 开源致谢折叠状态：仅保留于当前应用会话（重启后收起；切换设置页不卸载故状态保留）
+  const [ackOpen, setAckOpen] = useState(false);
 
-  // 初始加载（失败回退默认值，避免区块整体不渲染）
-  useEffect(() => {
-    ipc
-      .getSettings()
-      .then((s) => setSettings({ ...DEFAULT_SETTINGS, ...s }))
-      .catch(() => setSettings({ ...DEFAULT_SETTINGS }));
-    ipc.getAppInfo().then(setInfo).catch(() => setInfo(null));
-  }, []);
-
-  // 保存（防抖由按钮触发；数字输入即时保存过于频繁，改为失焦/按钮统一保存）
-  async function persist(next: SettingsT) {
-    setSettings(next);
-    setSaving(true);
-    setError("");
+  // 初始加载失败时保留错误，由恢复页显式重试。
+  async function loadSettings() {
+    setLoadError("");
     try {
-      await ipc.updateSettings(next);
-    } catch (e) {
-      setError(errMsg(e));
-    } finally {
-      setSaving(false);
+      const loaded = { ...DEFAULT_SETTINGS, ...(await ipc.getSettings()) };
+      settingsRef.current = loaded;
+      setSettings(loaded);
+    } catch (cause) {
+      setLoadError(errMsg(cause));
+      setSettings(null);
     }
   }
 
-  function setTheme(mode: ThemeMode, value: number) {
-    onThemeModeChange(mode);
-    if (settings) persist({ ...settings, darkMode: value });
+  useEffect(() => {
+    void loadSettings();
+    ipc.getAppInfo().then(setInfo).catch(() => setInfo(null));
+  }, []);
+
+  async function flushSettings() {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    setSaving(true);
+    while (savePending.current && settingsRef.current) {
+      savePending.current = false;
+      const snapshot = { ...settingsRef.current };
+      try {
+        const result = await ipc.updateSettings(snapshot);
+        // 设置已保存；仅当下载引擎同步失败时给非阻塞提示（重启引擎后生效），不报错、不回滚
+        if (result?.engineSyncFailed) {
+          setNotice(`设置已保存；下载引擎暂未同步（${result.engineSyncError || "引擎未响应"}）`);
+          window.setTimeout(() => setNotice(""), 6000);
+        }
+      } catch (cause) {
+        setError(`${errMsg(cause)}；已重新读取后端设置`);
+        savePending.current = false;
+        try {
+          const restored = { ...DEFAULT_SETTINGS, ...(await ipc.getSettings()) };
+          settingsRef.current = restored;
+          setSettings(restored);
+        } catch (reloadCause) {
+          setLoadError(errMsg(reloadCause));
+          setSettings(null);
+        }
+      }
+    }
+    saveInFlight.current = false;
+    setSaving(false);
+    // 队列清空后与后端对账一次（吸收顶部明暗切换等本页之外的外观保存）
+    try {
+      const fresh = { ...DEFAULT_SETTINGS, ...(await ipc.getSettings()) };
+      if (!saveInFlight.current) {
+        settingsRef.current = fresh;
+        setSettings((prev) => (prev ? fresh : prev));
+      }
+    } catch {
+      // 后端不可达：保留现状
+    }
+  }
+
+  // 将本次渲染发生变化的字段合并到最新 ref，连续操作不会被旧快照覆盖。
+  async function persist(next: SettingsT) {
+    const rendered = settings ?? next;
+    const patch = Object.fromEntries(
+      (Object.keys(next) as (keyof SettingsT)[])
+        .filter((key) => !Object.is(next[key], rendered[key]))
+        .map((key) => [key, next[key]]),
+    ) as Partial<SettingsT>;
+    const merged = { ...(settingsRef.current ?? rendered), ...patch } as SettingsT;
+    settingsRef.current = merged;
+    setSettings(merged);
+    setError("");
+    savePending.current = true;
+    await flushSettings();
+  }
+
+  // 保存队列清空后与后端回读值对账：吸收顶部明暗切换等其他来源的外观保存，
+  // 避免本页后续保存用陈旧快照覆盖别的字段（对账失败静默，等待下次保存重试）。
+  useEffect(() => {
+    const un = onSettingsUpdated((s) => {
+      if (!saveInFlight.current) {
+        settingsRef.current = { ...DEFAULT_SETTINGS, ...s };
+        setSettings((prev) => (prev ? { ...prev, ...s } : prev));
+      }
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  function setTheme(mode: ThemeMode) {
+    onAppearanceChange({ mode });
+  }
+
+  // 配色主题卡方向键导航（radio 语义：左右 / 上下移动选择）
+  const themeGridRef = useRef<HTMLDivElement>(null);
+  function onThemeGridKeyDown(e: React.KeyboardEvent) {
+    if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(e.key)) return;
+    e.preventDefault();
+    const delta = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+    const current = COLOR_THEMES.findIndex((t) => t.id === colorTheme);
+    const next = COLOR_THEMES[(current + delta + COLOR_THEMES.length) % COLOR_THEMES.length];
+    onAppearanceChange({ colorTheme: next.id });
+    const buttons = themeGridRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+    buttons?.[COLOR_THEMES.findIndex((t) => t.id === next.id)]?.focus();
   }
 
   async function pickDownloadDir() {
@@ -178,23 +349,33 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
       <PageHeader tab="settings" subtitle="外观、下载与关于" />
 
       {error && (
-        <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</div>
+        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
       {notice && (
-        <div className="rounded-ctrl bg-cactus/25 px-4 py-2.5 text-sm text-ink">{notice}</div>
+        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</div>
+      )}
+      {loadError && !s && (
+        <section className="rounded-card bg-carrier p-6">
+          <h3 className="text-sm font-semibold text-danger">设置读取失败</h3>
+          <p className="mt-2 text-sm text-ink-soft">{loadError}</p>
+          <button onClick={() => void loadSettings()} className="mt-4 rounded-ctrl bg-clay px-4 py-2 text-sm font-medium text-on-accent">重试</button>
+        </section>
       )}
 
-      {/* 外观 */}
+      {/* 外观：明暗模式 × 配色主题（两者独立选择；即时预览，经共享队列持久化） */}
       <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
         <h3 className="text-sm font-semibold text-ink">外观</h3>
+
+        {/* 明暗模式（保留 darkMode 原数值含义：0 跟随系统 / 1 浅色 / 2 深色） */}
         <div className="mt-4 flex gap-1.5">
           {THEME_OPTIONS.map((opt) => (
             <button
               key={opt.mode}
-              onClick={() => setTheme(opt.mode, opt.value)}
+              onClick={() => setTheme(opt.mode)}
+              aria-pressed={themeMode === opt.mode}
               className={`rounded-ctrl px-4 py-1.5 text-sm font-medium transition-colors ${
                 themeMode === opt.mode
-                  ? "bg-clay text-white"
+                  ? "bg-clay text-on-accent"
                   : "bg-carrier-deep text-ink-soft hover:text-ink"
               }`}
             >
@@ -202,6 +383,27 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
             </button>
           ))}
         </div>
+
+        {/* 配色主题（与明暗独立；设置持久化于 settings.colorTheme） */}
+        <div
+          ref={themeGridRef}
+          role="radiogroup"
+          aria-label="配色主题"
+          onKeyDown={onThemeGridKeyDown}
+          className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7"
+        >
+          {COLOR_THEMES.map((t) => (
+            <ThemeCard
+              key={t.id}
+              theme={t}
+              selected={t.id === colorTheme}
+              onSelect={() => onAppearanceChange({ colorTheme: t.id })}
+            />
+          ))}
+        </div>
+        <p className="mt-3 text-xs text-ink-soft/70">
+          配色与明暗相互独立；跟随系统时仅明暗随系统变化，所选配色始终保留。
+        </p>
       </section>
 
       {/* 通用 */}
@@ -326,7 +528,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                     onClick={() => persist({ ...s, downloadSpeedLimit: opt.value })}
                     className={`rounded-ctrl px-3 py-1 text-xs font-medium transition-colors ${
                       s.downloadSpeedLimit === opt.value
-                        ? "bg-clay text-white"
+                        ? "bg-clay text-on-accent"
                         : "bg-carrier-deep text-ink-soft hover:text-ink"
                     }`}
                   >
@@ -405,6 +607,37 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
               </div>
             )}
           </dl>
+
+          {/* BT Tracker 自动更新 + 完成后动作 */}
+          <div className="mt-2 divide-y divide-ink/10 border-t border-ink/10 pt-1">
+            <ToggleRow
+              icon={Magnet}
+              title="BT Tracker 列表自动更新"
+              desc="每日拉取 TrackersListCollection 高速公共列表（走代理设置），提升磁力 / BT 下载速度"
+              checked={s.btTrackerAutoUpdate}
+              onChange={(v) => persist({ ...s, btTrackerAutoUpdate: v })}
+            />
+            <div className="flex items-center justify-between gap-4 py-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <Power size={16} className="mt-0.5 shrink-0 text-clay" strokeWidth={1.8} />
+                <div className="min-w-0">
+                  <p className="text-sm text-ink-soft">全部下载完成后</p>
+                  <p className="mt-0.5 text-xs text-ink-soft/70">关机保留 60 秒取消窗口（命令行执行 shutdown /a）</p>
+                </div>
+              </div>
+              <select
+                value={s.afterDownloadAction}
+                onChange={(e) => persist({ ...s, afterDownloadAction: e.currentTarget.value })}
+                className="h-9 shrink-0 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 text-xs text-ink focus:border-clay focus:outline-none"
+              >
+                {AFTER_ACTION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </section>
       )}
 
@@ -511,7 +744,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                       }
                     }}
                     disabled={proxyTesting || !s.proxyHost || !s.proxyPort}
-                    className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-white transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-on-accent transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
                   >
                     {proxyTesting ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
                     测试代理
@@ -520,8 +753,8 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                     <span
                       className={
                         proxyResult.ok
-                          ? `truncate text-xs text-cactus`
-                          : "truncate text-xs text-clay-deep"
+                          ? `truncate text-xs text-success`
+                          : "truncate text-xs text-danger"
                       }
                       title={proxyResult.error}
                     >
@@ -585,6 +818,35 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
               checked={s.showSearchTab}
               onChange={(v) => persist({ ...s, showSearchTab: v })}
             />
+            <ToggleRow
+              icon={Rss}
+              title="订阅追剧自动下载"
+              desc="在搜索页订阅关键词后，定时聚合搜索、识别新集并自动解析下载（借鉴 quark-auto-save）"
+              checked={s.subscriptionEnabled}
+              onChange={(v) => persist({ ...s, subscriptionEnabled: v })}
+            />
+            {s.subscriptionEnabled && (
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex min-w-0 items-start gap-3">
+                  <Bell size={16} className="mt-0.5 shrink-0 text-clay" strokeWidth={1.8} />
+                  <div className="min-w-0">
+                    <p className="text-sm text-ink-soft">订阅检查间隔</p>
+                    <p className="mt-0.5 text-xs text-ink-soft/70">新建订阅将在下个周期开始自动检查</p>
+                  </div>
+                </div>
+                <select
+                  value={s.subscriptionIntervalMinutes}
+                  onChange={(e) => persist({ ...s, subscriptionIntervalMinutes: Number(e.currentTarget.value) })}
+                  className="h-9 shrink-0 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 text-xs text-ink focus:border-clay focus:outline-none"
+                >
+                  {SUB_INTERVAL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
         </section>
       )}
@@ -631,7 +893,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                 → 发现新版 <span className="font-mono">v{updater.info.latestVersion}</span>
               </span>
             ) : updater.checked ? (
-              <span className="text-sm text-cactus">已是最新版本</span>
+              <span className="text-sm text-success">已是最新版本</span>
             ) : null}
             <button
               onClick={() => updater.check()}
@@ -662,7 +924,9 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                   </div>
                   <span className="font-mono text-[11px] text-ink-soft">
                     {updater.progress.total > 0
-                      ? `${((updater.progress.received / updater.progress.total) * 100).toFixed(0)}%`
+                      ? `${formatBytes(updater.progress.received)} / ${formatBytes(updater.progress.total)} · ${(
+                          (updater.progress.received / updater.progress.total) * 100
+                        ).toFixed(0)}%`
                       : "…"}
                   </span>
                 </div>
@@ -670,11 +934,10 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
               <div className="flex items-center gap-2">
                 <button
                   onClick={async () => {
-                    const path = await updater.download();
-                    if (path) updater.install(path);
+                    await updater.apply();
                   }}
                   disabled={updater.downloading || updater.installing}
-                  className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-white transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-medium text-on-accent transition-colors enabled:hover:bg-clay-deep disabled:opacity-50"
                 >
                   <Download size={13} />
                   {updater.installing ? "正在安装…" : updater.downloading ? "下载中…" : "立即更新"}
@@ -690,7 +953,7 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
                 )}
               </div>
               {updater.error && (
-                <p className="mt-2 text-xs text-clay-deep">{updater.error}</p>
+                <p className="mt-2 text-xs text-danger">{updater.error}</p>
               )}
               {updater.installing && (
                 <p className="mt-2 text-xs text-ink-soft">将退出应用并自动重启完成更新…</p>
@@ -733,27 +996,60 @@ export default function SettingsPage({ themeMode, onThemeModeChange, onNavigate 
         />
       </section>
 
-      {/* 开源致谢 */}
+      {/* 开源致谢：原位折叠组件（默认收起，仅显示标题 / 项目数 / 箭头；
+          展开状态仅保留于当前应用会话，重启后收起；切换设置页期间不卸载故状态保留） */}
       <section className="animate-rise rounded-card bg-carrier p-6" style={{ animationDelay: "210ms" }}>
         <p className="font-mono text-[10px] tracking-[0.25em] text-ink-soft">OPEN SOURCE</p>
-        <h3 className="mt-1.5 text-sm font-semibold text-ink">开源致谢</h3>
-        <p className="mt-1 text-xs text-ink-soft/80">
-          本项目依赖 / 参考了以下开源项目，谨此致谢；各项目版权归其作者所有。
-        </p>
-        <ul className="mt-4 space-y-2">
-          {ACKNOWLEDGEMENTS.map((a) => (
-            <li key={a.name}>
-              <button
-                onClick={() => openUrl(a.url).catch(() => {})}
-                className="flex w-full items-center gap-3 rounded-ctrl border border-ink/10 bg-carrier-deep px-3.5 py-2.5 text-left transition-colors hover:border-clay hover:bg-ivory"
-              >
-                <span className="shrink-0 font-mono text-sm font-semibold text-ink">{a.name}</span>
-                <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">{a.role}</span>
-                <ExternalLink size={13} className="shrink-0 text-ink-soft" />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <button
+          type="button"
+          id="ack-toggle"
+          aria-expanded={ackOpen}
+          aria-controls="ack-panel"
+          onClick={() => setAckOpen((v) => !v)}
+          className="mt-1.5 flex w-full items-center justify-between gap-3 rounded-ctrl text-left focus-visible:outline-none"
+        >
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-ink">开源致谢</span>
+            <span className="mt-0.5 block text-xs text-ink-soft/80">
+              依赖 / 参考 {ACKNOWLEDGEMENTS.length} 个开源项目{ackOpen ? "" : "，点击展开说明与列表"}
+            </span>
+          </span>
+          <ChevronDown
+            size={18}
+            strokeWidth={1.8}
+            aria-hidden
+            className={`chevron-rotate shrink-0 text-ink-soft transition-transform duration-200 ${ackOpen ? "rotate-180" : ""}`}
+          />
+        </button>
+        <div
+          id="ack-panel"
+          role="region"
+          aria-labelledby="ack-toggle"
+          className="collapse-grid"
+          data-open={ackOpen}
+          aria-hidden={!ackOpen}
+          inert={!ackOpen}
+        >
+          <div className="collapse-inner">
+            <p className="mt-3 border-t border-ink/10 pt-3 text-xs text-ink-soft/80">
+              本项目依赖 / 参考了以下开源项目，谨此致谢；各项目版权归其作者所有。
+            </p>
+            <ul className="mt-3 space-y-2">
+              {ACKNOWLEDGEMENTS.map((a) => (
+                <li key={a.name}>
+                  <button
+                    onClick={() => openUrl(a.url).catch(() => {})}
+                    className="flex w-full items-center gap-3 rounded-ctrl border border-ink/10 bg-carrier-deep px-3.5 py-2.5 text-left transition-colors hover:border-clay hover:bg-ivory"
+                  >
+                    <span className="shrink-0 font-mono text-sm font-semibold text-ink">{a.name}</span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-ink-soft">{a.role}</span>
+                    <ExternalLink size={13} className="shrink-0 text-ink-soft" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       </section>
     </div>
   );

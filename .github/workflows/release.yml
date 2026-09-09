@@ -1,4 +1,4 @@
-name: 构建并发布 v0.4
+name: 构建并发布 v0.5
 
 # 触发：推送 v* 标签（git push --tags），或手动运行
 on:
@@ -8,12 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "发布版本号（如 v0.4.1）"
+        description: "发布版本号（如 v0.5.1）"
         required: false
-        default: "v0.4.1"
+        default: "v0.5.1"
 
 env:
   GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY || 'ANTIMelody/YunX_DeskTop_Test' }}
+  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.version }}
 
 jobs:
   # ---------- 构建（Windows，含代码签名）----------
@@ -46,6 +47,17 @@ jobs:
 
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
+
+      - name: 校验更新签名密钥
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "缺少更新签名私钥或密码，拒绝构建不可更新的 Release"
+          }
 
       # ---------- 代码签名（可选）：配置了 WINDOWS_CERTIFICATE 才执行 ----------
       - name: 导入签名证书到用户证书库
@@ -82,19 +94,48 @@ jobs:
         run: pnpm tauri build --verbose
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: 列出产物
+      - name: 校验签名产物并生成 latest.json
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: |
-          Get-ChildItem -Recurse src-tauri/target/release/bundle -Include *.exe,*.msi | ForEach-Object { Write-Host "ARTIFACT: $($_.FullName) ($($_.Length) bytes)" }
+          $bundle = "src-tauri/target/release/bundle"
+          $out = "release-artifacts"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $tag = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "无法确定发布标签" }
+          $version = $tag.TrimStart('v')
+          $nsis = Get-ChildItem "$bundle/nsis" -Filter "*_${version}_x64-setup.exe" | Select-Object -First 1
+          $msi = Get-ChildItem "$bundle/msi" -Filter "*_${version}_x64_*.msi" | Select-Object -First 1
+          if ($null -eq $nsis -or $null -eq $msi) { throw "NSIS/MSI 安装包不完整" }
+          $nsisSig = "$($nsis.FullName).sig"
+          $msiSig = "$($msi.FullName).sig"
+          if (-not (Test-Path $nsisSig) -or -not (Test-Path $msiSig)) { throw "缺少 NSIS/MSI .sig，拒绝发布" }
+          Copy-Item $nsis.FullName,$msi.FullName,$nsisSig,$msiSig -Destination $out
+          $assetName = [Uri]::EscapeDataString($nsis.Name)
+          $latest = @{
+            version = $version
+            notes = "YunX $tag"
+            pub_date = [DateTime]::UtcNow.ToString("o")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = (Get-Content $nsisSig -Raw).Trim()
+                url = "https://github.com/${{ github.repository }}/releases/download/$tag/$assetName"
+              }
+            }
+          }
+          $latest | ConvertTo-Json -Depth 8 | Set-Content "$out/latest.json" -Encoding utf8
+          if (-not (Test-Path "$out/latest.json")) { throw "latest.json 生成失败" }
+          Get-ChildItem $out | ForEach-Object { Write-Host "ARTIFACT: $($_.Name) ($($_.Length) bytes)" }
 
       - name: 上传产物（暂存）
         uses: actions/upload-artifact@v4
         with:
           name: build-artifacts
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          path: release-artifacts/*
           if-no-files-found: error
 
   # ---------- 发布（GitHub + GitCode 双源）----------
@@ -102,11 +143,16 @@ jobs:
     name: 发布到 GitHub / GitCode
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     env:
-      TAG_NAME: ${{ github.ref_name }}
+      TAG_NAME: ${{ env.RELEASE_TAG }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: 下载构建产物
         uses: actions/download-artifact@v4
         with:
@@ -135,6 +181,8 @@ jobs:
           files: |
             dist/*.exe
             dist/*.msi
+            dist/*.sig
+            dist/latest.json
           draft: false
           prerelease: false
 
@@ -179,3 +227,20 @@ jobs:
             eval "curl -fsS -o /dev/null -X PUT $HDRS --data-binary @\"$FILE\" \"$UPLOAD_URL\""
             echo "  → $NAME 上传完成"
           done
+
+          # 3. 镜像 latest.json（平台 URL 改写为 GitCode），供应用内更新器 GitHub 失败时回退
+          if [ -f dist/latest.json ]; then
+            echo "上传 latest.json（URL 改写为 GitCode）..."
+            sed "s#https://github.com/${{ github.repository }}/releases/download/#https://gitcode.com/${REPO}/releases/download/#g" \
+              dist/latest.json > dist/latest.gitcode.json
+            NAME="latest.json"
+            UPLOAD_INFO=$(curl -fsS \
+              -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" \
+              "https://api.gitcode.com/api/v5/repos/${REPO}/releases/${TAG}/upload_url?file_name=${NAME}")
+            UPLOAD_URL=$(echo "$UPLOAD_INFO" | jq -r '.url')
+            HDRS=$(echo "$UPLOAD_INFO" | jq -r '.headers | to_entries | map("-H " + ("\"" + .key + ": " + .value + "\"")) | join(" ")')
+            eval "curl -fsS -o /dev/null -X PUT $HDRS --data-binary @\"dist/latest.gitcode.json\" \"$UPLOAD_URL\""
+            echo "  → latest.json 上传完成"
+          else
+            echo "!! dist/latest.json 不存在，GitCode 回退源不可用（更新器将只走 GitHub）"
+          fi

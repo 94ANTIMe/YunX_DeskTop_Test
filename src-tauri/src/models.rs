@@ -166,6 +166,9 @@ pub struct Settings {
     pub baidu_speed_password: String,
     /// 深色模式：0 跟随系统 / 1 浅色 / 2 深色
     pub dark_mode: i32,
+    /// 配色主题 ID（前端 src/lib/themes.ts 注册表；未知 ID 前端回退 warm-editorial）
+    #[serde(default = "default_color_theme")]
+    pub color_theme: String,
     /// 启动时自动检查在线更新（GitHub Releases）
     pub auto_check_update: bool,
     /// 剪贴板监听：复制分享链接自动提示解析（默认关）
@@ -191,6 +194,27 @@ pub struct Settings {
     pub active_account_keys: std::collections::BTreeMap<String, String>,
     /// 首启引导已完成
     pub onboarded: bool,
+    /// 订阅追剧自动下载总开关（默认开；PanSou 未配置时实际不生效）
+    pub subscription_enabled: bool,
+    /// 订阅检查间隔（分钟，默认 360）
+    pub subscription_interval_minutes: i64,
+    /// BT Tracker 列表自动更新（XIU2/TrackersListCollection 每日列表，默认开）
+    pub bt_tracker_auto_update: bool,
+    /// 下载完成后动作："none" | "shutdown"（60 秒后关机）| "sleep"（睡眠）
+    pub after_download_action: String,
+}
+
+/// 配色主题默认值（与前端 DEFAULT_COLOR_THEME 对齐）
+pub fn default_color_theme() -> String {
+    "warm-editorial".into()
+}
+
+/// update_settings 返回：设置必定已保存；engine_sync_* 仅提示下载引擎同步是否失败（非阻塞）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSettingsResult {
+    pub engine_sync_failed: bool,
+    pub engine_sync_error: Option<String>,
 }
 
 impl Default for Settings {
@@ -208,6 +232,7 @@ impl Default for Settings {
             baidu_speed_base_url: String::new(),
             baidu_speed_password: String::new(),
             dark_mode: 0,
+            color_theme: default_color_theme(),
             auto_check_update: true,
             clipboard_monitor: false,
             minimize_to_tray: true,
@@ -222,6 +247,10 @@ impl Default for Settings {
             proxy_password: String::new(),
             active_account_keys: std::collections::BTreeMap::new(),
             onboarded: false,
+            subscription_enabled: true,
+            subscription_interval_minutes: 360,
+            bt_tracker_auto_update: true,
+            after_download_action: "none".into(),
         }
     }
 }
@@ -267,6 +296,44 @@ impl DownloadTaskView {
     pub const STATUS_PAUSED: i32 = 2;
     pub const STATUS_COMPLETED: i32 = 3;
     pub const STATUS_FAILED: i32 = 4;
+}
+
+/// 下载统计总览（统计报表页；独立 download_stat 表，清空任务记录不影响）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsOverview {
+    pub totals: StatsTotals,
+    pub daily: Vec<StatsDaily>,
+    pub platforms: Vec<StatsPlatform>,
+}
+
+/// 累计汇总
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsTotals {
+    pub files: i64,
+    pub bytes: i64,
+    pub failed: i64,
+}
+
+/// 单日聚合（day = "YYYY-MM-DD"，本地时区）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsDaily {
+    pub day: String,
+    pub files: i64,
+    pub bytes: i64,
+    pub failed: i64,
+}
+
+/// 平台维度聚合
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsPlatform {
+    pub platform: String,
+    pub files: i64,
+    pub bytes: i64,
+    pub failed: i64,
 }
 
 /// 下载任务 Dashboard 详情（任务卡片点开后的扩展数据）
@@ -315,4 +382,35 @@ pub struct ResolveHistoryRow {
     pub title: String,
     pub platform: String,
     pub create_time: i64,
+}
+
+/// 订阅条目（subscription 表行，前端展示）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionRow {
+    pub id: i64,
+    pub keyword: String,
+    /// 优先搜索的网盘类型（JSON 数组字符串，如 ["quark","uc"]）
+    pub cloud_types_json: String,
+    /// 自定义集数过滤正则（空 = 不过滤）
+    pub episode_regex: String,
+    pub enabled: bool,
+    /// 上次检查时间戳（毫秒；0 = 从未运行）
+    pub last_run_at: i64,
+    /// 上次执行结果摘要（供 UI 展示）
+    pub last_result: String,
+    pub create_time: i64,
+}
+
+/// 订阅新增/编辑入参（前端 upsert）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUpsert {
+    pub keyword: String,
+    /// 优先搜索的网盘类型（如 ["quark","uc"]）
+    #[serde(default)]
+    pub cloud_types: Vec<String>,
+    /// 自定义集数过滤正则（空 = 不过滤）
+    #[serde(default)]
+    pub episode_regex: String,
 }

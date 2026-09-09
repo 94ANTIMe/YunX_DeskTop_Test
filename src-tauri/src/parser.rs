@@ -107,3 +107,18 @@ pub fn parse(text: &str) -> AppResult<ParsedShare> {
         pwd,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn parses_supported_link_and_password_forms() {
+        let quark = parse("https://pan.quark.cn/s/AbC123 提取码：9xYz").unwrap();
+        assert_eq!((quark.platform.as_str(), quark.share_id.as_str(), quark.pwd.as_str()), ("quark", "AbC123", "9xYz"));
+        let baidu = parse("https://pan.baidu.com/s/1Ab_cd?pwd=a1b2").unwrap();
+        assert_eq!((baidu.platform.as_str(), baidu.share_id.as_str(), baidu.pwd.as_str()), ("baidu", "Ab_cd", "a1b2"));
+        assert_eq!(parse("magnet:?xt=urn:btih:ABCDEF").unwrap().platform, "magnet");
+        assert_eq!(parse("https://example.com/file.zip").unwrap().platform, "direct");
+    }
+}

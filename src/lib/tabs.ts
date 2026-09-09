@@ -1,5 +1,6 @@
 import {
   ArrowDownToLine,
+  ChartColumn,
   Cloud,
   Link2,
   ScrollText,
@@ -8,8 +9,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-/** 主 Tab 标识（对应 Android 版 MainTab 枚举 + 桌面版新增搜索/日志页） */
-export type TabId = "resolve" | "drive" | "search" | "download" | "logs" | "settings";
+/** 主 Tab 标识（对应 Android 版 MainTab 枚举 + 桌面版新增搜索/统计/日志页） */
+export type TabId = "resolve" | "drive" | "search" | "download" | "stats" | "logs" | "settings";
 
 export interface TabDef {
   id: TabId;
@@ -27,6 +28,7 @@ export const TABS: TabDef[] = [
   { id: "drive", label: "网盘", latin: "DRIVES", index: "02", icon: Cloud },
   { id: "search", label: "搜索", latin: "SEARCH", index: "03", icon: Search },
   { id: "download", label: "下载", latin: "DOWNLOADS", index: "04", icon: ArrowDownToLine },
-  { id: "logs", label: "日志", latin: "LOGS", index: "05", icon: ScrollText },
-  { id: "settings", label: "设置", latin: "SETTINGS", index: "06", icon: Settings2 },
+  { id: "stats", label: "统计", latin: "STATS", index: "05", icon: ChartColumn },
+  { id: "logs", label: "日志", latin: "LOGS", index: "06", icon: ScrollText },
+  { id: "settings", label: "设置", latin: "SETTINGS", index: "07", icon: Settings2 },
 ];

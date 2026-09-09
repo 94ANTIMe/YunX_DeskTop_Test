@@ -7,7 +7,7 @@ use crate::state::AppState;
 
 /// 列出收藏链接
 #[tauri::command]
-pub fn list_bookmarks(app: AppHandle) -> AppResult<Vec<BookmarkRow>> {
+pub async fn list_bookmarks(app: AppHandle) -> AppResult<Vec<BookmarkRow>> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     let mut stmt = conn.prepare(
@@ -32,7 +32,7 @@ pub fn list_bookmarks(app: AppHandle) -> AppResult<Vec<BookmarkRow>> {
 
 /// 收藏链接（自动识别平台；重复链接更新）
 #[tauri::command]
-pub fn add_bookmark(app: AppHandle, link: String, title: String, pwd: String) -> AppResult<i64> {
+pub async fn add_bookmark(app: AppHandle, link: String, title: String, pwd: String) -> AppResult<i64> {
     let state = app.state::<AppState>();
     let platform = crate::parser::parse(&link)
         .map(|p| p.platform)
@@ -70,7 +70,7 @@ pub fn add_bookmark(app: AppHandle, link: String, title: String, pwd: String) ->
 
 /// 删除收藏
 #[tauri::command]
-pub fn remove_bookmark(app: AppHandle, id: i64) -> AppResult<()> {
+pub async fn remove_bookmark(app: AppHandle, id: i64) -> AppResult<()> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     conn.execute("DELETE FROM bookmark WHERE id = ?1", params![id])?;

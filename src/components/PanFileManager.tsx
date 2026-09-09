@@ -147,12 +147,12 @@ export default function PanFileManager({
 
       {/* 提示条 */}
       {error && (
-        <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-xs text-clay-deep">
+        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-xs text-danger">
           {error}
         </div>
       )}
       {notice && (
-        <div className="rounded-ctrl bg-cactus/20 px-4 py-2.5 text-xs text-ink font-medium">
+        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-xs text-ink font-medium">
           {notice}
         </div>
       )}
@@ -223,7 +223,7 @@ export default function PanFileManager({
                     <button
                       onClick={() => downloadPersonalFile(file)}
                       disabled={downloadingFid === file.fid}
-                      className="flex items-center gap-1.5 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+                      className="flex items-center gap-1.5 rounded-ctrl bg-clay px-3 py-1 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
                     >
                       {downloadingFid === file.fid ? (
                         <Loader2 size={13} className="animate-spin" />

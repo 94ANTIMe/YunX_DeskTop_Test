@@ -11,6 +11,7 @@
     "opener:allow-open-path",
     "dialog:default",
     "notification:default",
-    "autostart:default"
+    "autostart:default",
+    "updater:default"
   ]
 }

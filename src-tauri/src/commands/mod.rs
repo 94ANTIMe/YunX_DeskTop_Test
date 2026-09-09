@@ -7,4 +7,5 @@ pub mod network;
 pub mod resolve;
 pub mod search;
 pub mod settings;
-pub mod update;
+pub mod stats;
+pub mod subscription;

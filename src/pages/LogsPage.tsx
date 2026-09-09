@@ -8,7 +8,7 @@ import logsHero from "../assets/art/logs-hero.jpg";
 type LevelFilter = "" | "success" | "error" | "info";
 
 const LEVEL_META: Record<string, { label: string; icon: typeof Info; cls: string; dot: string }> = {
-  success: { label: "成功", icon: CheckCircle2, cls: "text-cactus", dot: "bg-cactus" },
+  success: { label: "成功", icon: CheckCircle2, cls: "text-success", dot: "bg-success" },
   error: { label: "失败", icon: XCircle, cls: "text-clay-deep", dot: "bg-clay-deep" },
   info: { label: "记录", icon: Info, cls: "text-ink-soft", dot: "bg-ink-soft/50" },
 };
@@ -20,8 +20,8 @@ const FILTERS: { value: LevelFilter; label: string }[] = [
   { value: "info", label: "记录" },
 ];
 
-/** 日志页：解析 / 收集 / 取链 / 下载 / 登录全链路日志（3s 轮询） */
-export default function LogsPage() {
+/** 日志页：解析 / 收集 / 取链 / 下载 / 登录全链路日志（激活时 3s 轮询，隐藏页完全停止） */
+export default function LogsPage({ active }: { active: boolean }) {
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [filter, setFilter] = useState<LevelFilter>("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -31,8 +31,9 @@ export default function LogsPage() {
   const filterRef = useRef(filter);
   filterRef.current = filter;
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  // showSpinner 仅手动刷新时展示（后台轮询不闪加载态、少一次渲染）
+  const refresh = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
     try {
       const list = await ipc.listLogs(filterRef.current || undefined, 500);
       setLogs(list);
@@ -40,22 +41,18 @@ export default function LogsPage() {
     } catch (e) {
       setError(errMsg(e));
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   }, []);
 
-  // 初始 + 3s 自动轮询
+  // 初始 + 3s 自动轮询 + 切筛选立即刷新：仅页面激活时运行（照 SearchPage/StatsPage 的 active 门控）
   useEffect(() => {
+    if (!active) return;
     refresh();
     if (!auto) return;
-    const timer = window.setInterval(refresh, 3000);
+    const timer = window.setInterval(() => refresh(), 3000);
     return () => window.clearInterval(timer);
-  }, [auto, refresh]);
-
-  // 切筛选立即刷新
-  useEffect(() => {
-    refresh();
-  }, [filter, refresh]);
+  }, [active, auto, filter, refresh]);
 
   async function clearAll() {
     try {
@@ -73,7 +70,7 @@ export default function LogsPage() {
     <div className="space-y-6">
       <PageHeader tab="logs" subtitle="收集 / 取链 / 下载 / 登录全链路记录">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-xs text-cactus">{successCount} 成功</span>
+          <span className="font-mono text-xs text-success">{successCount} 成功</span>
           <span className="font-mono text-xs text-clay-deep">{errorCount} 失败</span>
           <button
             onClick={() => setAuto((a) => !a)}
@@ -84,7 +81,7 @@ export default function LogsPage() {
             {auto ? "自动刷新中" : "已暂停"}
           </button>
           <button
-            onClick={refresh}
+            onClick={() => refresh(true)}
             disabled={loading}
             className="rounded-ctrl border border-ink/15 p-1.5 text-ink-soft transition-colors hover:border-clay hover:text-clay-deep disabled:opacity-40"
             title="刷新"
@@ -102,7 +99,7 @@ export default function LogsPage() {
       </PageHeader>
 
       {error && (
-        <div className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</div>
+        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
 
       {/* hero 插画带 */}
@@ -131,7 +128,7 @@ export default function LogsPage() {
               onClick={() => setFilter(f.value)}
               className={`rounded-ctrl px-4 py-1.5 text-sm font-medium transition-colors ${
                 filter === f.value
-                  ? "bg-clay text-white"
+                  ? "bg-clay text-on-accent"
                   : "bg-carrier-deep text-ink-soft hover:text-ink"
               }`}
             >

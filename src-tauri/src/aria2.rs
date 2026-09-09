@@ -29,6 +29,109 @@ https://tracker.tamersunion.org:443/announce,\
 http://tracker.dler.org:6969/announce,\
 udp://tracker.altrosky.nl:6969/announce";
 
+/// BT Tracker 在线列表源（借鉴 Motrix；依次回退：GitHub 原始 → jsDelivr → ghproxy 镜像）
+const TRACKER_SOURCES: &[&str] = &[
+    "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt",
+    "https://cdn.jsdelivr.net/gh/XIU2/TrackersListCollection@master/all.txt",
+    "https://ghproxy.net/https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt",
+];
+/// 动态 tracker 列表上限（控制 aria2 启动参数长度）
+const MAX_TRACKERS: usize = 300;
+
+/// 当前生效的 tracker 列表（拉取成功后热更新；入队与引擎启动参数共用）
+static TRACKERS: OnceLock<std::sync::RwLock<String>> = OnceLock::new();
+
+fn trackers_cell() -> &'static std::sync::RwLock<String> {
+    TRACKERS.get_or_init(|| std::sync::RwLock::new(DEFAULT_BT_TRACKERS.to_string()))
+}
+
+/// 当前 tracker 列表（逗号分隔）
+pub fn current_bt_trackers() -> String {
+    trackers_cell()
+        .read()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| DEFAULT_BT_TRACKERS.to_string())
+}
+
+/// 解析 tracker 文本：去空行 / 注释 / 非法行，去重并截断上限
+fn parse_trackers(text: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || !t.contains("://") {
+            continue;
+        }
+        if seen.insert(t.to_string()) {
+            out.push(t);
+            if out.len() >= MAX_TRACKERS {
+                break;
+            }
+        }
+    }
+    out.join(",")
+}
+
+/// 拉取最新 tracker 列表：在线源依次回退 → 本地缓存（data_dir/bt_trackers.txt）→ 内置列表。
+/// 成功后更新全局缓存并落盘供离线兜底。
+async fn fetch_bt_trackers(app: &AppHandle) -> String {
+    let state = app.state::<AppState>();
+    let settings = state.load_settings();
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if proxy_configured(&settings) {
+        if let Ok(p) = reqwest::Proxy::all(build_proxy_arg(&settings)) {
+            builder = builder.proxy(p);
+        }
+    }
+    let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
+    for src in TRACKER_SOURCES {
+        match http.get(*src).send().await {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => {
+                    let list = parse_trackers(&text);
+                    if list.len() > 50 {
+                        if let Ok(mut cell) = trackers_cell().write() {
+                            *cell = list.clone();
+                        }
+                        let _ = std::fs::write(state.data_dir.join("bt_trackers.txt"), &list);
+                        engine_log(
+                            app,
+                            &format!(
+                                "fetch_bt_trackers: 已更新 {} 个 tracker（来源 {src}）",
+                                list.split(',').count()
+                            ),
+                        );
+                        return list;
+                    }
+                    engine_log(app, &format!("fetch_bt_trackers: 源返回无效内容 {src}"));
+                }
+                Err(e) => engine_log(app, &format!("fetch_bt_trackers: 源读取失败 {src} {e}")),
+            },
+            Err(e) => engine_log(app, &format!("fetch_bt_trackers: 源不可用 {src} {e}")),
+        }
+    }
+    if let Ok(cached) = std::fs::read_to_string(state.data_dir.join("bt_trackers.txt")) {
+        let cached = cached.trim().to_string();
+        if cached.len() > 50 {
+            engine_log(app, "fetch_bt_trackers: 在线拉取失败，使用本地缓存");
+            return cached;
+        }
+    }
+    engine_log(app, "fetch_bt_trackers: 在线与缓存均不可用，使用内置列表");
+    DEFAULT_BT_TRACKERS.to_string()
+}
+
+/// 拉取最新列表并热更新到运行中的引擎（启动首拉 + poll_loop 周期调用）
+async fn refresh_trackers(app: &AppHandle) {
+    let list = fetch_bt_trackers(app).await;
+    if rpc_call("aria2.changeGlobalOption", vec![json!({ "bt-tracker": list })])
+        .await
+        .is_err()
+    {
+        engine_log(app, "refresh_trackers: changeGlobalOption 失败（引擎未就绪？）");
+    }
+}
+
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 /// 持久化读取/写入本地 RPC 密钥，保持多次重启或热重载间密钥绝对一致
@@ -98,9 +201,15 @@ fn kill_stale_aria2_on_port(port: u16) {
 #[cfg(not(windows))]
 fn kill_stale_aria2_on_port(_port: u16) {}
 
+/// aria2 RPC 专用 HTTP 客户端（OnceLock 复用连接池，避免每次调用重建 Client 与 TCP 连接）
+fn rpc_http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 /// 底层单次 JSON-RPC 调用
 async fn rpc_call_raw(method: &str, params: Vec<Value>) -> AppResult<Value> {
-    let http = reqwest::Client::new();
+    let http = rpc_http();
     // aria2 JSON-RPC：params 数组首元素为 "token:<secret>"，其后为实际参数
     let mut all_params: Vec<Value> = vec![json!(format!("token:{}", rpc_secret()))];
     all_params.extend(params);
@@ -117,7 +226,14 @@ async fn rpc_call_raw(method: &str, params: Vec<Value>) -> AppResult<Value> {
         .send()
         .await
         .map_err(|e| AppError::Api(format!("下载引擎通信失败: {e}")))?;
-    let v: Value = resp.json().await?;
+    // 引擎繁忙 / 重启中会返回空体或截断响应；先读文本再解析，避免 reqwest
+    // "error decoding response body" 这类不可读错误，且便于上层识别为瞬时失败重试
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| AppError::Api(format!("下载引擎响应读取失败: {e}")))?;
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| AppError::Api(format!("下载引擎响应解析失败（引擎可能正在重启）: {e}")))?;
     if let Some(err) = v.get("error") {
         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("RPC 错误");
         return Err(AppError::Api(format!("下载引擎: {msg}")));
@@ -125,20 +241,40 @@ async fn rpc_call_raw(method: &str, params: Vec<Value>) -> AppResult<Value> {
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
 
-/// 发起 JSON-RPC 请求，带 Unauthorized 自愈机制：若捕获到旧实例密钥冲突，自动清理端口冲突进程并拉起新引擎重试
+/// 瞬时传输失败（引擎重启 / 繁忙导致的空响应、连接抖动）：可安全重试一次
+fn is_transient_rpc_error(msg: &str) -> bool {
+    msg.contains("下载引擎通信失败")
+        || msg.contains("下载引擎响应读取失败")
+        || msg.contains("下载引擎响应解析失败")
+}
+
+/// 发起 JSON-RPC 请求：Unauthorized 走引擎自愈重拉，瞬时传输失败短退避重试一次
 async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
     match rpc_call_raw(method, params.clone()).await {
         Ok(v) => Ok(v),
         Err(AppError::Api(msg)) if msg.contains("Unauthorized") => {
             if let Some(app) = APP_HANDLE.get() {
                 engine_log(app, "rpc_call: 遇到 Unauthorized 鉴权失败，触发下载引擎自愈机制");
-                kill_stale_aria2_on_port(RPC_PORT);
+                // netstat/tasklist/taskkill 是同步子进程，放 blocking 线程执行，避免冻结 tokio worker
+                let _ = tokio::task::spawn_blocking(|| kill_stale_aria2_on_port(RPC_PORT)).await;
                 if spawn_sidecar(app).await {
                     engine_log(app, "rpc_call: 引擎自愈重拉成功，重试原 RPC 请求");
                     return rpc_call_raw(method, params).await;
                 }
             }
             Err(AppError::Api(msg))
+        }
+        Err(AppError::Api(msg)) if is_transient_rpc_error(&msg) => {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            match rpc_call_raw(method, params).await {
+                Ok(v) => {
+                    if let Some(app) = APP_HANDLE.get() {
+                        engine_log(app, "rpc_call: 瞬时通信失败已重试成功");
+                    }
+                    Ok(v)
+                }
+                Err(second) => Err(second),
+            }
         }
         Err(e) => Err(e),
     }
@@ -210,6 +346,10 @@ async fn spawn_sidecar(app: &AppHandle) -> bool {
     let download_dir = resolve_download_dir(app, &settings);
     engine_log(app, &format!("spawn_sidecar: 下载目录 {}", download_dir.display()));
 
+    // BT Tracker 用当前列表（不在此处在线拉取，避免阻塞引擎启动；
+    // start() 会在引擎就绪后后台首拉并通过 changeGlobalOption 热更新）
+    let bt_trackers = current_bt_trackers();
+
     let shell = app.shell();
     match shell.sidecar("aria2c") {
         Ok(cmd) => {
@@ -238,13 +378,13 @@ async fn spawn_sidecar(app: &AppHandle) -> bool {
                 "--bt-max-peers=60".to_string(),
                 "--follow-torrent=mem".to_string(),
                 "--seed-time=0".to_string(),
-                format!("--bt-tracker={DEFAULT_BT_TRACKERS}"),
+                format!("--bt-tracker={}", bt_trackers),
                 format!("--stop-with-process={}", std::process::id()),
             ];
             if proxy_configured(&settings) {
                 let proxy = build_proxy_arg(&settings);
                 args.push(format!("--all-proxy={proxy}"));
-                engine_log(app, &format!("spawn_sidecar: 已注入代理 --all-proxy={proxy}"));
+                engine_log(app, &format!("spawn_sidecar: 已注入代理 {}", proxy_log_summary(&settings)));
             }
             let cmd = cmd.args(args);
             match cmd.spawn() {
@@ -290,9 +430,15 @@ pub async fn start(app: AppHandle) {
 
     // 2. 若不可用或端口冲突，定向查杀 16800 上的旧 aria2c 进程并重新拉起
     if !healthy {
-        kill_stale_aria2_on_port(RPC_PORT);
+        let _ = tokio::task::spawn_blocking(|| kill_stale_aria2_on_port(RPC_PORT)).await;
         let ready = spawn_sidecar(&app).await;
         engine_log(&app, &format!("start: 新引擎启动 就绪={ready}"));
+    }
+
+    // BT Tracker 自动更新：引擎复用旧实例时启动参数未带新列表，这里首拉一次热更新
+    if app.state::<AppState>().load_settings().bt_tracker_auto_update {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move { refresh_trackers(&app2).await });
     }
 
     // 恢复未完成任务（aria2 重启后 gid 失效，重新入队续传）
@@ -350,7 +496,53 @@ pub(crate) fn proxy_configured(settings: &Settings) -> bool {
         && settings.proxy_port > 0
 }
 
+fn proxy_log_summary(settings: &Settings) -> String {
+    format!(
+        "type={} host={} port={} auth={}",
+        settings.proxy_type,
+        settings.proxy_host.trim(),
+        settings.proxy_port,
+        !settings.proxy_username.is_empty()
+    )
+}
+
 // ---------- 任务入队 / 控制 ----------
+
+async fn mark_enqueue_failed(app: &AppHandle, id: i64, message: &str) {
+    let state = app.state::<AppState>();
+    let finish_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    if let Ok(conn) = state.db.lock() {
+        let _ = mark_enqueue_failed_in_db(&conn, id, message, finish_time);
+    }
+    push_list(app).await;
+}
+
+fn mark_enqueue_failed_in_db(conn: &rusqlite::Connection, id: i64, message: &str, finish_time: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE download_task SET status = ?1, error_msg = ?2, finish_time = ?3, gid = '' WHERE id = ?4",
+        rusqlite::params![DownloadTaskView::STATUS_FAILED, message, finish_time, id],
+    )
+}
+
+fn clear_targets(conn: &rusqlite::Connection) -> AppResult<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare("SELECT gid, platform, cleanup_id FROM download_task")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+async fn cleanup_transfer(state: &AppState, platform: &str, cleanup_id: &str) {
+    if cleanup_id.is_empty() {
+        return;
+    }
+    match platform {
+        "quark" => crate::resolve::cleanup_quark(state, cleanup_id).await,
+        "baidu" => crate::resolve::cleanup_baidu(state, cleanup_id).await,
+        _ => {}
+    }
+}
 
 /// 将下载任务提交给 aria2 引擎（addUri → 回写 gid，不插入 DB）
 async fn add_to_aria2(
@@ -395,7 +587,7 @@ async fn add_to_aria2(
         json!({
             "dir": dir.display().to_string(),
             "continue": "true",
-            "bt-tracker": DEFAULT_BT_TRACKERS,
+            "bt-tracker": current_bt_trackers(),
             "seed-time": "0",
         })
     } else {
@@ -450,6 +642,7 @@ pub async fn enqueue(
 ) -> AppResult<i64> {
     let state = app.state::<AppState>();
     let headers_json = serde_json::to_string(&headers)?;
+    let mirrors_json = serde_json::to_string(&mirrors)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -457,14 +650,18 @@ pub async fn enqueue(
     let id = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, create_time, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) RETURNING id",
-            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, now],
+            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, create_time, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0) RETURNING id",
+            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, mirrors_json, now],
             |r| r.get::<_, i64>(0),
         )?
     };
 
-    add_to_aria2(app, id, url, file_name, headers, platform, cleanup_id, start_paused, mirrors).await?;
+    if let Err(error) = add_to_aria2(app, id, url, file_name, headers, platform, cleanup_id, start_paused, mirrors).await {
+        mark_enqueue_failed(app, id, &error.to_string()).await;
+        cleanup_transfer(&state, platform, cleanup_id).await;
+        return Err(error);
+    }
     Ok(id)
 }
 
@@ -483,7 +680,7 @@ pub async fn enqueue_torrent(
     let options = json!({
         "dir": dir.display().to_string(),
         "continue": "true",
-        "bt-tracker": DEFAULT_BT_TRACKERS,
+        "bt-tracker": current_bt_trackers(),
         "seed-time": "0",
     });
 
@@ -506,9 +703,15 @@ pub async fn enqueue_torrent(
         Ok(v) => v.as_str().unwrap_or("").to_string(),
         Err(e) => {
             state.log(crate::logger::ERROR, "magnet", "download", &format!("种子解析入队失败：{file_name}"), &e.to_string());
+            mark_enqueue_failed(app, id, &e.to_string()).await;
             return Err(e);
         }
     };
+    if gid.is_empty() {
+        let error = AppError::Api("下载引擎未返回种子任务 gid".into());
+        mark_enqueue_failed(app, id, &error.to_string()).await;
+        return Err(error);
+    }
 
     {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
@@ -530,16 +733,18 @@ pub async fn pause(app: &AppHandle, id: i64) -> AppResult<()> {
     if !gid.is_empty() {
         rpc_call("aria2.pause", vec![json!(gid)]).await?;
     }
-    update_status(app, id, DownloadTaskView::STATUS_PAUSED, "").await
+    update_status(app, id, DownloadTaskView::STATUS_PAUSED, "").await?;
+    push_list(app).await;
+    Ok(())
 }
 
 /// 恢复
 pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     let state = app.state::<AppState>();
-    let (gid, url, file_name, headers_json, _platform, _cleanup_id, status) = {
+    let (gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, status) = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "SELECT gid, url, file_name, request_headers_json, platform, cleanup_id, status FROM download_task WHERE id = ?1",
+            "SELECT gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status FROM download_task WHERE id = ?1",
             rusqlite::params![id],
             |r| {
                 Ok((
@@ -549,7 +754,8 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
-                    r.get::<_, i32>(6)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, i32>(7)?,
                 ))
             },
         )?
@@ -565,19 +771,22 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     if !unpaused {
         // 重新入队 aria2（用于从失败态恢复或 unpause 失败时重入队，支持断点续传）
         let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
-        add_to_aria2(app, id, &url, &file_name, &headers, &_platform, &_cleanup_id, false, Vec::new()).await?;
+        let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
+        add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, false, mirrors).await?;
     }
 
-    update_status(app, id, DownloadTaskView::STATUS_DOWNLOADING, "").await
+    update_status(app, id, DownloadTaskView::STATUS_DOWNLOADING, "").await?;
+    push_list(app).await;
+    Ok(())
 }
 
 /// 删除任务（aria2 remove + DB 删除 + 转存清理）
 pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<()> {
     let state = app.state::<AppState>();
-    let (gid, file_name, cleanup_id, platform) = {
+    let (gid, file_name, cleanup_id, platform, save_path) = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "SELECT gid, file_name, cleanup_id, platform FROM download_task WHERE id = ?1",
+            "SELECT gid, file_name, cleanup_id, platform, save_path FROM download_task WHERE id = ?1",
             rusqlite::params![id],
             |r| {
                 Ok((
@@ -585,6 +794,7 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             },
         )
@@ -595,9 +805,14 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
         let _ = rpc_call("aria2.forceRemove", vec![json!(gid)]).await;
     }
     if delete_local && !file_name.is_empty() {
-        let dir = resolve_download_dir(app, &state.load_settings());
-        for name in [file_name.clone(), format!("{file_name}.aria2")] {
-            let _ = std::fs::remove_file(dir.join(name));
+        let path = if save_path.is_empty() {
+            resolve_download_dir(app, &state.load_settings()).join(&file_name)
+        } else {
+            std::path::PathBuf::from(&save_path)
+        };
+        let _ = std::fs::remove_file(&path);
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            let _ = std::fs::remove_file(path.with_file_name(format!("{name}.aria2")));
         }
     }
     {
@@ -605,11 +820,8 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
         conn.execute("DELETE FROM download_task WHERE id = ?1", rusqlite::params![id])?;
     }
     // 删除任务同样触发夸克 / 百度转存清理（用户放弃下载）
-    if platform == "quark" && !cleanup_id.is_empty() {
-        crate::resolve::cleanup_quark(&state, &cleanup_id).await;
-    } else if platform == "baidu" && !cleanup_id.is_empty() {
-        crate::resolve::cleanup_baidu(&state, &cleanup_id).await;
-    }
+    cleanup_transfer(&state, &platform, &cleanup_id).await;
+    push_list(app).await;
     Ok(())
 }
 
@@ -617,19 +829,22 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
 pub async fn clear_all(app: &AppHandle) -> AppResult<()> {
     let state = app.state::<AppState>();
     // 收集全部 gid 并强制移除（含进行中/等待/暂停）
-    let gids: Vec<String> = {
+    let tasks: Vec<(String, String, String)> = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-        let mut stmt = conn.prepare("SELECT gid FROM download_task WHERE gid != ''")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.filter_map(Result::ok).collect()
+        clear_targets(&conn)?
     };
-    for gid in gids {
+    // 任务间并发移除（单任务内仍先 forceRemove 后清结果），aria2 卡顿时不再线性放大清空耗时
+    futures_util::future::join_all(tasks.iter().filter(|(gid, _, _)| !gid.is_empty()).map(|(gid, _, _)| async move {
         let _ = rpc_call("aria2.forceRemove", vec![json!(gid)]).await;
         let _ = rpc_call("aria2.removeDownloadResult", vec![json!(gid)]).await;
-    }
+    }))
+    .await;
     {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.execute("DELETE FROM download_task", [])?;
+    }
+    for (_, platform, cleanup_id) in &tasks {
+        cleanup_transfer(&state, platform, cleanup_id).await;
     }
     // 清空后向前端推送空列表
     let views: Vec<DownloadTaskView> = Vec::new();
@@ -639,7 +854,7 @@ pub async fn clear_all(app: &AppHandle) -> AppResult<()> {
 
 /// 暂停全部进行中/等待任务（aria2.pauseAll + DB 置暂停态 + 事件）
 pub async fn pause_all(app: &AppHandle) -> AppResult<()> {
-    let _ = rpc_call("aria2.pauseAll", vec![]).await;
+    rpc_call("aria2.pauseAll", vec![]).await?;
     let state = app.state::<AppState>();
     {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
@@ -654,7 +869,7 @@ pub async fn pause_all(app: &AppHandle) -> AppResult<()> {
 
 /// 继续全部暂停任务（aria2.unpauseAll + DB 置下载态 + 事件）
 pub async fn resume_all(app: &AppHandle) -> AppResult<()> {
-    let _ = rpc_call("aria2.unpauseAll", vec![]).await;
+    rpc_call("aria2.unpauseAll", vec![]).await?;
     let state = app.state::<AppState>();
     {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
@@ -699,11 +914,11 @@ async fn update_status(app: &AppHandle, id: i64, status: i32, error_msg: &str) -
 }
 
 trait OptionalRow {
-    fn optional_row(self) -> AppResult<Option<(String, String, String, String)>>;
+    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String)>>;
 }
 
-impl OptionalRow for rusqlite::Result<(String, String, String, String)> {
-    fn optional_row(self) -> AppResult<Option<(String, String, String, String)>> {
+impl OptionalRow for rusqlite::Result<(String, String, String, String, String)> {
+    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String)>> {
         match self {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -717,10 +932,10 @@ impl OptionalRow for rusqlite::Result<(String, String, String, String)> {
 /// 恢复未完成任务（重新 addUri，paused 状态的以暂停态入队）
 async fn resume_pending_tasks(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let rows: Vec<(i64, String, String, String, String, String, bool)> = {
+    let rows: Vec<(i64, String, String, String, String, String, String, bool)> = {
         let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, url, file_name, request_headers_json, platform, cleanup_id, status \
+            "SELECT id, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status \
              FROM download_task WHERE status IN (0, 1, 2)",
         ) {
             Ok(s) => s,
@@ -735,80 +950,278 @@ async fn resume_pending_tasks(app: &AppHandle) {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
-                    r.get::<_, i32>(6)? == DownloadTaskView::STATUS_PAUSED,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, i32>(7)? == DownloadTaskView::STATUS_PAUSED,
                 ))
             })
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default();
         rows
     };
-    for (id, url, file_name, headers_json, platform, cleanup_id, was_paused) in rows {
+    for (id, url, file_name, headers_json, platform, cleanup_id, mirrors_json, was_paused) in rows {
         let headers: Vec<(String, String)> =
             serde_json::from_str(&headers_json).unwrap_or_default();
+        let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
         // 清掉旧 gid（新 aria2 实例不认识）
         {
             let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
             let _ = conn.execute("UPDATE download_task SET gid = '' WHERE id = ?1", rusqlite::params![id]);
         }
-        if let Err(e) = add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, was_paused, Vec::new()).await {
+        if let Err(e) = add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, was_paused, mirrors).await {
             eprintln!("[yunx] 恢复任务 {id} 失败: {e}");
             let _ = update_status(app, id, DownloadTaskView::STATUS_FAILED, &e.to_string()).await;
         }
     }
 }
 
-/// 轮询循环：1s 拉取所有进行中任务状态 → 事件推送 + DB 节流写
+/// 轮询行：进行中任务 + 24h 内终态任务（终态随事件流保留，前端合并不再卡旧状态）
+struct Row {
+    id: i64,
+    gid: String,
+    file_name: String,
+    platform: String,
+    db_status: i32,
+    cleanup_id: String,
+    url: String,
+    create_time: i64,
+    total_size: i64,
+    downloaded_size: i64,
+    error_msg: String,
+    save_path: String,
+    active: bool,
+}
+
+/// 统计聚合：完成/失败时按（本地日, 平台）累加（独立表，清空任务记录不影响统计）
+fn bump_stat(conn: &rusqlite::Connection, platform: &str, ok: bool, bytes: i64) {
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let files = if ok { 1 } else { 0 };
+    let failed = if ok { 0 } else { 1 };
+    let _ = conn.execute(
+        "INSERT INTO download_stat (day, platform, files, bytes, failed) VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(day, platform) DO UPDATE SET files = files + ?3, bytes = bytes + ?4, failed = failed + ?5",
+        rusqlite::params![day, platform, files, if ok { bytes } else { 0 }, failed],
+    );
+}
+
+/// 全部任务已结束且设置了完成后动作时，返回该动作（"shutdown" / "sleep"）
+fn pending_after_complete(state: &AppState) -> Option<String> {
+    let action = state.load_settings().after_download_action;
+    if action != "shutdown" && action != "sleep" {
+        return None;
+    }
+    let conn = state.db.lock().ok()?;
+    let active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM download_task WHERE status IN (0, 1, 2)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if active == 0 {
+        Some(action)
+    } else {
+        None
+    }
+}
+
+/// 执行完成后动作：发系统预告通知后落盘执行（仅 Windows 桌面场景）
+#[cfg(windows)]
+async fn run_after_complete_action(app: &AppHandle, action: &str, last_file: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    fn build(program: &str, args: &[&str], flags: u32) -> std::process::Command {
+        let mut c = std::process::Command::new(program);
+        c.args(args);
+        c.creation_flags(flags);
+        c
+    }
+
+    let (title, body, mut cmd) = match action {
+        // shutdown 自带 60 秒宽限，命令行执行 shutdown /a 可取消
+        "shutdown" => (
+            "即将关机",
+            format!("全部任务已完成（{last_file}）。60 秒后关机，命令行执行 shutdown /a 可取消。"),
+            build("shutdown", &["/s", "/t", "60"], CREATE_NO_WINDOW),
+        ),
+        "sleep" => (
+            "即将睡眠",
+            format!("全部任务已完成（{last_file}）。10 秒后系统进入睡眠。"),
+            build(
+                "rundll32.exe",
+                &["powrprof.dll,SetSuspendState", "0,1,0"],
+                CREATE_NO_WINDOW,
+            ),
+        ),
+        _ => return,
+    };
+    engine_log(app, &format!("after_download: 触发 {action} 动作"));
+    if app.state::<AppState>().load_settings().download_notify {
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
+    // 睡眠动作给一个短宽限期，避免终态通知尚未弹出即挂起
+    if action == "sleep" {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+    let _ = cmd.spawn();
+}
+
+/// 非 Windows 平台不执行完成后动作（当前仅发布 Windows 桌面版）
+#[cfg(not(windows))]
+async fn run_after_complete_action(_app: &AppHandle, _action: &str, _last_file: &str) {}
+
+/// 批量查询任务状态：一次 system.multicall 打包全部 tellStatus（N 个任务 1 次 HTTP 往返）
+/// 单个 gid 查询失败（引擎不认识/已移除）对应位置返回 None
+async fn tell_status_batch(gids: &[String]) -> Vec<Option<TaskStatus>> {
+    if gids.is_empty() {
+        return Vec::new();
+    }
+    let secret = format!("token:{}", rpc_secret());
+    let calls: Vec<Value> = gids
+        .iter()
+        .map(|gid| json!({ "methodName": "aria2.tellStatus", "params": [secret, gid] }))
+        .collect();
+    match rpc_call("system.multicall", vec![json!(calls)]).await {
+        Ok(Value::Array(results)) if results.len() == gids.len() => results
+            .into_iter()
+            .map(|entry| match entry {
+                Value::Array(inner) => inner.into_iter().next().map(|v| parse_status(&v)),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![None; gids.len()],
+    }
+}
+
+/// 事件载荷指纹：任一任务的关键字段变化才推送 downloads:updated（空闲时前端零 IPC）
+fn views_fingerprint(views: &[DownloadTaskView]) -> String {
+    use std::fmt::Write as _;
+    let mut fp = String::with_capacity(views.len() * 64);
+    for v in views {
+        let _ = write!(
+            fp,
+            "{}/{}/{}/{}/{}/{}/{}/{};",
+            v.id, v.status, v.total_size, v.downloaded_size, v.speed, v.error_msg, v.save_path, v.create_time
+        );
+    }
+    fp
+}
+
+/// 轮询循环：批量拉取任务状态 → 变更检测后事件推送 + DB 节流写
+/// 有进行中任务时 1s 一轮，空闲降为 3s；内容无变化不 emit、不动托盘
 async fn poll_loop(app: AppHandle) {
     let mut last_persist = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let mut last_tracker_refresh = std::time::Instant::now();
+    let mut last_emit_fp = String::new();
+    let mut last_tray: (usize, i64) = (0, 0);
+    let mut interval_secs = 1u64;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
         let state = app.state::<AppState>();
 
-        // 读取进行中任务（含刚完成的，短暂保留）
-        let rows: Vec<(i64, String, String, String, i32, String)> = {
+        // BT Tracker 每 6 小时在线刷新并热更新到引擎（异步执行，不阻塞轮询）
+        if last_tracker_refresh.elapsed() >= std::time::Duration::from_secs(6 * 3600) {
+            last_tracker_refresh = std::time::Instant::now();
+            if state.load_settings().bt_tracker_auto_update {
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move { refresh_trackers(&app2).await });
+            }
+        }
+
+        // 读取进行中任务 + 24h 内终态任务（进行中优先占用 LIMIT 名额）
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let finish_window = now_ms - 24 * 3600 * 1000;
+        let rows: Vec<Row> = {
             let conn = match state.db.lock() {
                 Ok(c) => c,
                 Err(_) => continue,
             };
             let mut stmt = match conn.prepare(
-                "SELECT id, gid, file_name, platform, status, cleanup_id \
-                 FROM download_task WHERE status IN (0, 1, 2) OR (status = 3 AND create_time > 0 AND save_path != '') LIMIT 200",
+                "SELECT id, gid, file_name, platform, status, cleanup_id, url, create_time, total_size, downloaded_size, error_msg, save_path \
+                 FROM download_task \
+                 WHERE status IN (0, 1, 2) OR (status IN (3, 4) AND finish_time > ?1) \
+                 ORDER BY CASE WHEN status IN (0, 1, 2) THEN 0 ELSE 1 END, id DESC LIMIT 200",
             ) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i32>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
+            stmt.query_map(rusqlite::params![finish_window], |r| {
+                let status: i32 = r.get(4)?;
+                Ok(Row {
+                    id: r.get(0)?,
+                    gid: r.get(1)?,
+                    file_name: r.get(2)?,
+                    platform: r.get(3)?,
+                    db_status: status,
+                    cleanup_id: r.get(5)?,
+                    url: r.get(6)?,
+                    create_time: r.get(7)?,
+                    total_size: r.get(8)?,
+                    downloaded_size: r.get(9)?,
+                    error_msg: r.get(10)?,
+                    save_path: r.get(11)?,
+                    active: status == DownloadTaskView::STATUS_PENDING
+                        || status == DownloadTaskView::STATUS_DOWNLOADING
+                        || status == DownloadTaskView::STATUS_PAUSED,
+                })
             })
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default()
         };
-        // 完成态的任务由状态转换时已写入 save_path，这里只需查进行中的
-        let rows: Vec<_> = rows.into_iter().filter(|r| r.4 != DownloadTaskView::STATUS_COMPLETED).collect();
+        let had_active = rows.iter().any(|r| r.active);
+
+        // 活跃任务 gid 一次批量取回状态（替代逐任务串行 RPC）
+        let active_gids: Vec<String> = rows
+            .iter()
+            .filter(|r| r.active && !r.gid.is_empty())
+            .map(|r| r.gid.clone())
+            .collect();
+        let mut status_iter = tell_status_batch(&active_gids).await.into_iter();
 
         let mut views: Vec<DownloadTaskView> = Vec::new();
         let mut persist_due = last_persist.elapsed() >= std::time::Duration::from_secs(2);
 
-        for (id, gid, file_name, platform, db_status, cleanup_id) in rows {
+        for row in rows {
+            let Row {
+                id,
+                gid,
+                file_name,
+                platform,
+                db_status,
+                cleanup_id,
+                url,
+                create_time,
+                total_size: db_total,
+                downloaded_size: db_done,
+                error_msg: db_err,
+                save_path: db_save,
+                active,
+            } = row;
+            // 24h 内终态：直接从 DB 构建视图，不再询问 aria2
+            if !active {
+                views.push(DownloadTaskView {
+                    id, gid, url, file_name, platform,
+                    total_size: db_total, downloaded_size: db_done, speed: 0,
+                    status: db_status, error_msg: db_err, save_path: db_save,
+                    create_time,
+                });
+                continue;
+            }
             if gid.is_empty() {
                 continue;
             }
-            let status = match rpc_call("aria2.tellStatus", vec![json!(gid)]).await {
-                Ok(v) => parse_status(&v),
-                Err(_) => {
-                    // aria2 不认识该 gid（进程重启）：保持 DB 状态
+            let status = match status_iter.next().flatten() {
+                Some(s) => s,
+                None => {
+                    // aria2 不认识该 gid（进程重启）或引擎不可达：保持 DB 状态
                     views.push(DownloadTaskView {
-                        id, gid, url: String::new(), file_name, platform,
-                        total_size: 0, downloaded_size: 0, speed: 0,
-                        status: db_status, error_msg: String::new(), save_path: String::new(),
-                        create_time: 0,
+                        id, gid, url, file_name, platform,
+                        total_size: db_total, downloaded_size: db_done, speed: 0,
+                        status: db_status, error_msg: db_err, save_path: db_save,
+                        create_time,
                     });
                     continue;
                 }
@@ -821,9 +1234,10 @@ async fn poll_loop(app: AppHandle) {
                 {
                     let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = conn.execute(
-                        "UPDATE download_task SET status = 3, total_size = ?1, downloaded_size = ?1, save_path = ?2 WHERE id = ?3",
-                        rusqlite::params![status.total, save_path, id],
+                        "UPDATE download_task SET status = 3, total_size = ?1, downloaded_size = ?1, save_path = ?2, finish_time = ?3 WHERE id = ?4",
+                        rusqlite::params![status.total, save_path, now_ms, id],
                     );
+                    bump_stat(&conn, &platform, true, status.total);
                 }
                 persist_due = true;
                 state.log(
@@ -849,13 +1263,18 @@ async fn poll_loop(app: AppHandle) {
                     let state_ref = app.state::<AppState>();
                     crate::resolve::cleanup_baidu(&state_ref, &cleanup_id).await;
                 }
+                // 下载完成后动作（关机 / 睡眠；仅当无其他进行中任务时触发）
+                if let Some(action) = pending_after_complete(&state) {
+                    run_after_complete_action(&app, &action, &file_name).await;
+                }
             } else if new_status == DownloadTaskView::STATUS_FAILED && db_status != DownloadTaskView::STATUS_FAILED {
                 {
                     let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = conn.execute(
-                        "UPDATE download_task SET status = 4, error_msg = ?1, total_size = ?2, downloaded_size = ?3 WHERE id = ?4",
-                        rusqlite::params![status.error_msg, status.total, status.completed, id],
+                        "UPDATE download_task SET status = 4, error_msg = ?1, total_size = ?2, downloaded_size = ?3, finish_time = ?4 WHERE id = ?5",
+                        rusqlite::params![status.error_msg, status.total, status.completed, now_ms, id],
                     );
+                    bump_stat(&conn, &platform, false, 0);
                 }
                 persist_due = true;
                 state.log(
@@ -886,7 +1305,7 @@ async fn poll_loop(app: AppHandle) {
             views.push(DownloadTaskView {
                 id,
                 gid,
-                url: String::new(),
+                url,
                 file_name,
                 platform,
                 total_size: status.total,
@@ -895,18 +1314,28 @@ async fn poll_loop(app: AppHandle) {
                 status: new_status,
                 error_msg: status.error_msg,
                 save_path,
-                create_time: 0,
+                create_time,
             });
         }
 
         if persist_due {
             last_persist = std::time::Instant::now();
         }
-        let _ = app.emit("downloads:updated", &views);
-        // 托盘 tooltip 汇总进行中任务数与总速度
-        let active_count = views.iter().filter(|v| v.status == DownloadTaskView::STATUS_DOWNLOADING).count();
-        let total_speed: i64 = views.iter().map(|v| v.speed).sum();
-        crate::tray::update_speed(&app, active_count, total_speed);
+        // 变更检测：内容一致则跳过事件推送（空闲时前端零 IPC、零重渲染）
+        let fp = views_fingerprint(&views);
+        if fp != last_emit_fp {
+            last_emit_fp = fp;
+            let _ = app.emit("downloads:updated", &views);
+            // 托盘 tooltip 汇总进行中任务数与总速度（数值变化才调系统 API）
+            let active_count = views.iter().filter(|v| v.status == DownloadTaskView::STATUS_DOWNLOADING).count();
+            let total_speed: i64 = views.iter().map(|v| v.speed).sum();
+            if (active_count, total_speed) != last_tray {
+                last_tray = (active_count, total_speed);
+                crate::tray::update_speed(&app, active_count, total_speed);
+            }
+        }
+        // 自适应频率：有进行中任务保持 1s，空闲降为 3s
+        interval_secs = if had_active { 1 } else { 3 };
     }
 }
 
@@ -942,27 +1371,15 @@ pub fn list_tasks(app: &AppHandle) -> AppResult<Vec<DownloadTaskView>> {
 
 /// 拉取单个任务完整详情（含 aria2 tellStatus 扩展字段，供 Dashboard 面板）
 pub async fn detail(app: &AppHandle, id: i64) -> AppResult<DownloadDetail> {
-    use rusqlite::OptionalExtension;
     let state = app.state::<AppState>();
-    let row: Option<(String, String, String, String, i64, i64, i32, String, String, i64)> = {
+    let row = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-        conn.query_row(
-            "SELECT gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time \
-             FROM download_task WHERE id = ?1",
-            rusqlite::params![id],
-            |r| {
-                Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
-                    r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
-                ))
-            },
-        )
-        .optional()?
+        load_detail_row(&conn, id)?
     };
 
     let (
         gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time,
-    ) = row.unwrap_or_default();
+    ) = row;
 
     let mut connections = 0i32;
     let mut upload_speed = 0i64;
@@ -996,18 +1413,94 @@ pub async fn detail(app: &AppHandle, id: i64) -> AppResult<DownloadDetail> {
     })
 }
 
+type DetailDbRow = (String, String, String, String, i64, i64, i32, String, String, i64);
+
+fn load_detail_row(conn: &rusqlite::Connection, id: i64) -> AppResult<DetailDbRow> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time \
+         FROM download_task WHERE id = ?1",
+        rusqlite::params![id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+    )
+    .optional()?
+    .ok_or_else(|| AppError::NotFound(format!("下载任务 #{id} 不存在")))
+}
+
 /// 设置变更后同步 aria2（限速 / 并发 / 代理）。
 /// 注意：aria2 对 all-proxy 的运行中修改支持有限，代理变更彻底生效仍需重启引擎
 ///（重启后由启动参数 --all-proxy 注入）；此处 best-effort 尝试即时更新。
-pub async fn apply_settings(app: &AppHandle, settings: &Settings) {
+pub async fn apply_settings(app: &AppHandle, settings: &Settings) -> AppResult<()> {
     let mut options = json!({
         "max-overall-download-limit": limit_str(settings.download_speed_limit),
         "max-concurrent-downloads": settings.max_concurrent_downloads.max(1),
     });
-    if proxy_configured(settings) {
-        options["all-proxy"] = json!(build_proxy_arg(settings));
-    }
-    if rpc_call("aria2.changeGlobalOption", vec![options]).await.is_err() {
+    options["all-proxy"] = json!(if proxy_configured(settings) { build_proxy_arg(settings) } else { String::new() });
+    if let Err(error) = rpc_call("aria2.changeGlobalOption", vec![options]).await {
         engine_log(app, "apply_settings: changeGlobalOption 失败（代理/限速可能需要重启引擎后生效）");
+        // 不再包含「设置已保存」上下文：该错误作为 engineSyncError 由前端以非阻塞提示展示
+        return Err(AppError::Api(format!("限速 / 并发 / 代理同步失败，重启引擎后生效：{error}")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, proxy_log_summary};
+    use crate::error::AppError;
+    use crate::models::Settings;
+
+    #[test]
+    fn proxy_log_never_contains_credentials() {
+        let mut settings = Settings::default();
+        settings.proxy_type = "http".into();
+        settings.proxy_host = "127.0.0.1".into();
+        settings.proxy_port = 7890;
+        settings.proxy_username = "secret-user".into();
+        settings.proxy_password = "secret-password".into();
+        let line = proxy_log_summary(&settings);
+        assert!(line.contains("host=127.0.0.1"));
+        assert!(line.contains("auth=true"));
+        assert!(!line.contains("secret-user"));
+        assert!(!line.contains("secret-password"));
+    }
+
+    #[test]
+    fn enqueue_failure_and_clear_cleanup_targets_are_persisted() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE download_task (
+                id INTEGER PRIMARY KEY, gid TEXT, url TEXT, file_name TEXT, platform TEXT,
+                total_size INTEGER DEFAULT 0, downloaded_size INTEGER DEFAULT 0,
+                status INTEGER, error_msg TEXT, save_path TEXT DEFAULT '', create_time INTEGER,
+                finish_time INTEGER, cleanup_id TEXT
+            );
+            INSERT INTO download_task VALUES (1, '', 'u1', 'a.bin', 'quark', 0, 0, 0, '', '', 1, 0, 'cleanup-a');
+            INSERT INTO download_task VALUES (2, 'gid-b', 'u2', 'b.bin', 'baidu', 0, 0, 1, '', '', 2, 0, 'cleanup-b');",
+        ).unwrap();
+        mark_enqueue_failed_in_db(&conn, 1, "rpc failed", 99).unwrap();
+        let failed: (i32, String, i64, String) = conn.query_row(
+            "SELECT status, error_msg, finish_time, gid FROM download_task WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(failed, (crate::models::DownloadTaskView::STATUS_FAILED, "rpc failed".into(), 99, "".into()));
+        let targets = clear_targets(&conn).unwrap();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().any(|(_, platform, cleanup)| platform == "quark" && cleanup == "cleanup-a"));
+        assert!(targets.iter().any(|(_, platform, cleanup)| platform == "baidu" && cleanup == "cleanup-b"));
+    }
+
+    #[test]
+    fn missing_download_detail_is_not_found() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE download_task (
+                id INTEGER PRIMARY KEY, gid TEXT, url TEXT, file_name TEXT, platform TEXT,
+                total_size INTEGER, downloaded_size INTEGER, status INTEGER, error_msg TEXT,
+                save_path TEXT, create_time INTEGER
+            );",
+        ).unwrap();
+        assert!(matches!(load_detail_row(&conn, 404), Err(AppError::NotFound(_))));
     }
 }

@@ -73,6 +73,16 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
     onClose();
   }
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void cancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // cancel 的行为仅随登录平台变化。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform, isWeb]);
+
   // 迅雷密码登录
   async function xunleiSubmit() {
     if (!username.trim() || !password || busy) return;
@@ -139,7 +149,7 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20 p-8 backdrop-blur-sm"
-      onClick={onClose}
+      onClick={() => void cancel()}
     >
       <div
         className="w-full max-w-md animate-rise rounded-card bg-carrier p-6 shadow-capsule"
@@ -171,12 +181,12 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
                 </div>
               </div>
             ) : notice ? (
-              <div className="rounded-ctrl bg-cactus/25 px-4 py-3 text-sm text-ink">{notice}</div>
+              <div className="rounded-ctrl bg-success/10 px-4 py-3 text-sm text-ink">{notice}</div>
             ) : (
               <p className="text-sm text-ink-soft">正在打开登录窗口…</p>
             )}
             {error && (
-              <p className="mt-3 rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</p>
+              <p className="mt-3 rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</p>
             )}
             <button
               onClick={cancel}
@@ -208,7 +218,7 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
                 <button
                   onClick={xunleiSubmit}
                   disabled={busy || !username.trim() || !password}
-                  className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+                  className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
                 >
                   {busy ? <Loader2 size={15} className="animate-spin" /> : <LogIn size={15} />}
                   登录
@@ -232,7 +242,7 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
                 <button
                   onClick={xunleiSmsSubmit}
                   disabled={busy || !smsCode.trim()}
-                  className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+                  className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
                 >
                   {busy ? <Loader2 size={15} className="animate-spin" /> : <LogIn size={15} />}
                   验证并登录
@@ -246,10 +256,10 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
               </>
             )}
             {error && (
-              <p className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</p>
+              <p className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</p>
             )}
             {notice && !error && (
-              <p className="rounded-ctrl bg-cactus/25 px-4 py-2.5 text-sm text-ink">{notice}</p>
+              <p className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</p>
             )}
           </div>
         )}
@@ -273,16 +283,16 @@ export default function LoginDialog({ platform, onClose, onSuccess }: LoginDialo
             <button
               onClick={pan123Submit}
               disabled={busy || !username.trim() || !password}
-              className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-white transition-colors hover:bg-clay-deep disabled:opacity-50"
+              className="flex w-full items-center justify-center gap-2 rounded-ctrl bg-clay py-2.5 text-sm font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
             >
               {busy ? <Loader2 size={15} className="animate-spin" /> : <LogIn size={15} />}
               登录
             </button>
             {error && (
-              <p className="rounded-ctrl bg-clay/10 px-4 py-2.5 text-sm text-clay-deep">{error}</p>
+              <p className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</p>
             )}
             {notice && !error && (
-              <p className="rounded-ctrl bg-cactus/25 px-4 py-2.5 text-sm text-ink">{notice}</p>
+              <p className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</p>
             )}
           </div>
         )}

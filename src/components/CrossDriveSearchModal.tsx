@@ -121,7 +121,7 @@ export default function CrossDriveSearchModal({
             <button
               onClick={() => doSearch(keyword)}
               disabled={loading || !keyword.trim()}
-              className="flex h-9 items-center gap-1.5 rounded-ctrl bg-clay px-4 text-xs font-semibold text-white hover:bg-clay-deep disabled:opacity-50"
+              className="flex h-9 items-center gap-1.5 rounded-ctrl bg-clay px-4 text-xs font-semibold text-on-accent hover:bg-clay-deep disabled:opacity-50"
             >
               {loading ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
               <span>搜索</span>
@@ -143,7 +143,7 @@ export default function CrossDriveSearchModal({
                 onClick={() => setFilterPlatform(p.id)}
                 className={`rounded-ctrl px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
                   filterPlatform === p.id
-                    ? "bg-clay text-white"
+                    ? "bg-clay text-on-accent"
                     : "bg-carrier border border-ink/10 text-ink-soft hover:text-ink"
                 }`}
               >
@@ -163,7 +163,7 @@ export default function CrossDriveSearchModal({
           )}
 
           {!loading && error && (
-            <div className="rounded-ctrl bg-clay/10 p-4 text-center text-xs text-clay-deep">
+            <div className="rounded-ctrl bg-danger/10 p-4 text-center text-xs text-danger">
               {error}
             </div>
           )}
@@ -194,7 +194,7 @@ export default function CrossDriveSearchModal({
                     onClose();
                     onResolveShare(item.url, item.password);
                   }}
-                  className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay/10 px-3 py-1.5 text-xs font-semibold text-clay-deep hover:bg-clay hover:text-white transition-colors"
+                  className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay/10 px-3 py-1.5 text-xs font-semibold text-clay-deep hover:bg-clay hover:text-on-accent transition-colors"
                 >
                   <Zap size={13} />
                   <span>立即解析</span>

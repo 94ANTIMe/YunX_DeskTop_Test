@@ -25,6 +25,8 @@ export interface Settings {
   /** 加速通道解析码（失效时自动更新） */
   baiduSpeedPassword: string;
   darkMode: number;
+  /** 配色主题 ID（七套之一；未知 ID 前端回退 warm-editorial） */
+  colorTheme: string;
   autoCheckUpdate: boolean;
   clipboardMonitor: boolean;
   minimizeToTray: boolean;
@@ -42,6 +44,14 @@ export interface Settings {
   activeAccountKeys: Record<string, string>;
   /** 首启引导已完成 */
   onboarded: boolean;
+  /** 订阅追剧自动下载总开关（默认开；PanSou 未配置时实际不生效） */
+  subscriptionEnabled: boolean;
+  /** 订阅检查间隔（分钟，默认 360） */
+  subscriptionIntervalMinutes: number;
+  /** BT Tracker 列表自动更新（默认开） */
+  btTrackerAutoUpdate: boolean;
+  /** 下载完成后动作："none" | "shutdown" | "sleep" */
+  afterDownloadAction: string;
 }
 
 /** 设置默认值（与 Rust Settings::default 对齐；IPC 不可用时兜底） */
@@ -58,6 +68,7 @@ export const DEFAULT_SETTINGS: Settings = {
   baiduSpeedBaseUrl: "",
   baiduSpeedPassword: "",
   darkMode: 0,
+  colorTheme: "warm-editorial",
   autoCheckUpdate: true,
   clipboardMonitor: false,
   minimizeToTray: true,
@@ -72,6 +83,10 @@ export const DEFAULT_SETTINGS: Settings = {
   proxyPassword: "",
   activeAccountKeys: {},
   onboarded: false,
+  subscriptionEnabled: true,
+  subscriptionIntervalMinutes: 360,
+  btTrackerAutoUpdate: true,
+  afterDownloadAction: "none",
 };
 
 /** PanSou 搜索结果条目（与 Rust SearchItem 对齐） */
@@ -266,6 +281,53 @@ export interface UpdateProgress {
   total: number;
 }
 
+// ---------- 下载统计 ----------
+
+export interface StatsTotals {
+  files: number;
+  bytes: number;
+  failed: number;
+}
+
+/** 单日聚合（day = "YYYY-MM-DD"，本地时区） */
+export interface StatsDaily {
+  day: string;
+  files: number;
+  bytes: number;
+  failed: number;
+}
+
+export interface StatsPlatform {
+  platform: string;
+  files: number;
+  bytes: number;
+  failed: number;
+}
+
+export interface StatsOverview {
+  totals: StatsTotals;
+  daily: StatsDaily[];
+  platforms: StatsPlatform[];
+}
+
+// ---------- 订阅追剧 ----------
+
+/** 订阅条目（对齐 Rust SubscriptionRow） */
+export interface Subscription {
+  id: number;
+  keyword: string;
+  /** 优先搜索的网盘类型（JSON 数组字符串，如 ["quark","uc"]） */
+  cloudTypesJson: string;
+  /** 自定义集数过滤正则（空 = 不过滤） */
+  episodeRegex: string;
+  enabled: boolean;
+  /** 上次检查时间戳（毫秒；0 = 从未运行） */
+  lastRunAt: number;
+  /** 上次执行结果摘要 */
+  lastResult: string;
+  createTime: number;
+}
+
 // ---------- 错误规范 ----------
 
 export interface AppError {
@@ -280,12 +342,18 @@ export function errMsg(e: unknown): string {
   return "未知错误";
 }
 
+/** update_settings 返回：设置必定已保存；engineSync* 提示下载引擎同步是否失败（非阻塞） */
+export interface UpdateSettingsResult {
+  engineSyncFailed: boolean;
+  engineSyncError: string | null;
+}
+
 // ---------- 命令封装 ----------
 
 export const ipc = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
   getSettings: () => invoke<Settings>("get_settings"),
-  updateSettings: (settings: Settings) => invoke<void>("update_settings", { settings }),
+  updateSettings: (settings: Settings) => invoke<UpdateSettingsResult>("update_settings", { settings }),
 
   listAccounts: () => invoke<AccountSummary[]>("list_accounts"),
   /** 平台账号列表（多账号切换下拉） */
@@ -307,7 +375,10 @@ export const ipc = {
   pan123Login: (account: string, password: string) =>
     invoke<string>("pan123_login", { account, password }),
 
-  resolveShare: (text: string) => invoke<ResolveSessionInfo>("resolve_share", { text }),
+  resolveShare: (text: string, pwdOverride?: string) =>
+    invoke<ResolveSessionInfo>("resolve_share", { text, pwdOverride: pwdOverride || null }),
+  /** 仅识别链接（平台 + 分享 id + 提取码），不建会话；批量队列用 */
+  parseShare: (text: string) => invoke<ParsedShare>("parse_share_link", { text }),
 
   pansouSearch: (kw: string, cloudTypes?: string[]) =>
     invoke<SearchItem[]>("pansou_search", { kw, cloudTypes }),
@@ -352,6 +423,8 @@ export const ipc = {
   listDownloadTasks: () => invoke<DownloadTask[]>("list_download_tasks"),
   clearDownloadTasks: () => invoke<void>("clear_download_tasks"),
   getDownloadDetail: (id: number) => invoke<DownloadDetail>("download_detail", { id }),
+  /** 下载统计总览（独立聚合表，清空任务记录不影响） */
+  getDownloadStats: (days?: number) => invoke<StatsOverview>("get_download_stats", { days }),
 
   listBookmarks: () => invoke<Bookmark[]>("list_bookmarks"),
   addBookmark: (link: string, title: string, pwd: string) =>
@@ -366,9 +439,19 @@ export const ipc = {
     invoke<LogRow[]>("list_logs", { level, limit }),
   clearLogs: () => invoke<void>("clear_logs"),
 
-  checkUpdate: () => invoke<UpdateInfo>("check_update"),
-  downloadUpdate: () => invoke<string>("download_update"),
-  installUpdate: (path: string) => invoke<void>("install_update", { path }),
+  listSubscriptions: () => invoke<Subscription[]>("list_subscriptions"),
+  addSubscription: (keyword: string, cloudTypes?: string[], episodeRegex?: string) =>
+    invoke<number>("add_subscription", { keyword, cloudTypes, episodeRegex }),
+  updateSubscription: (
+    id: number,
+    enabled: boolean,
+    keyword: string,
+    cloudTypes?: string[],
+    episodeRegex?: string,
+  ) =>
+    invoke<void>("update_subscription", { id, enabled, keyword, cloudTypes, episodeRegex }),
+  removeSubscription: (id: number) => invoke<void>("remove_subscription", { id }),
+  runSubscriptionNow: (id: number) => invoke<string>("run_subscription_now", { id }),
 
   testBaiduSpeedService: (baseUrl?: string, password?: string) =>
     invoke<BaiduSpeedCheckResult>("test_baidu_speed_service", {

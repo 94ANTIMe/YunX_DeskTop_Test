@@ -30,7 +30,7 @@ pub fn record_resolve(app: &AppHandle, link: &str, platform: &str, title: &str) 
 
 /// 列出解析历史
 #[tauri::command]
-pub fn list_resolve_history(app: AppHandle) -> AppResult<Vec<ResolveHistoryRow>> {
+pub async fn list_resolve_history(app: AppHandle) -> AppResult<Vec<ResolveHistoryRow>> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     let mut stmt = conn.prepare(
@@ -53,7 +53,7 @@ pub fn list_resolve_history(app: AppHandle) -> AppResult<Vec<ResolveHistoryRow>>
 
 /// 删除单条解析历史
 #[tauri::command]
-pub fn delete_resolve_history(app: AppHandle, id: i64) -> AppResult<()> {
+pub async fn delete_resolve_history(app: AppHandle, id: i64) -> AppResult<()> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     conn.execute("DELETE FROM resolve_history WHERE id = ?1", params![id])?;
@@ -62,7 +62,7 @@ pub fn delete_resolve_history(app: AppHandle, id: i64) -> AppResult<()> {
 
 /// 清空全部解析历史
 #[tauri::command]
-pub fn clear_resolve_history(app: AppHandle) -> AppResult<()> {
+pub async fn clear_resolve_history(app: AppHandle) -> AppResult<()> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     conn.execute("DELETE FROM resolve_history", [])?;

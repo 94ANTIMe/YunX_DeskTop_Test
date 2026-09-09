@@ -1,8 +1,28 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::crypto;
 use crate::error::AppResult;
 use crate::models::{AccountRow, AccountSummary, Platform};
+
+/// 读路径回写节流：同一账号行 60s 内多次读取只回写一次
+/// （旧明文迁移仍会尽快完成，但消除"每次读都解密→重加密→UPDATE"的写放大）
+static LAST_TOUCH: OnceLock<Mutex<HashMap<(String, String), std::time::Instant>>> = OnceLock::new();
+
+fn touch_throttled(platform_key: &str, row_key: &str) -> bool {
+    let map = LAST_TOUCH.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    if map
+        .get(&(platform_key.to_string(), row_key.to_string()))
+        .is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_secs(60))
+    {
+        return false;
+    }
+    map.insert((platform_key.to_string(), row_key.to_string()), now);
+    true
+}
 
 /// 内存账号模型（统一 6 平台的表结构差异；敏感字段经 DPAPI 加密后落盘）
 #[derive(Debug, Clone)]
@@ -75,9 +95,11 @@ pub fn load(conn: &Connection, platform: Platform, active_key: &str) -> AppResul
         Platform::Pan123 => load_pan123(conn, active_key)?,
         Platform::Direct | Platform::Magnet => return Ok(None),
     };
-    // 记录更新时间（登录态刷新）；顺带把旧明文行加密迁移
+    // 记录更新时间（登录态刷新）+ 旧明文迁移：按行节流，60s 内多次读取只回写一次
     if let (Some(acc), Some(key)) = (&acc, &row_key(conn, platform, active_key)?) {
-        let _ = save_with_key(conn, acc, now, key);
+        if touch_throttled(platform.key(), key) {
+            let _ = save_with_key(conn, acc, now, key);
+        }
     }
     Ok(acc)
 }

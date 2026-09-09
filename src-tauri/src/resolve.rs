@@ -5,6 +5,7 @@
 //! 139：匿名列目录 + 登录态取链（AES 加密分享接口）。
 //! 123：匿名列目录 + 登录态签名取链（download-v2 解码 + redirect 跟随）。
 //! 迅雷：getShare → restore 临时目录 → 文件详情取链 → 即时清理。
+use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
 use crate::api::{baidaccel, baidu, c139, pan123, quark, uc, xunlei};
@@ -73,6 +74,43 @@ impl ResolveSession {
 /// 会话表容量上限（超出淘汰最旧）
 const MAX_SESSIONS: usize = 32;
 
+/// 保留插入顺序的会话表，容量满时稳定淘汰最早会话。
+#[derive(Debug, Default)]
+pub struct ResolveSessions {
+    entries: HashMap<String, ResolveSession>,
+    order: VecDeque<String>,
+}
+
+impl ResolveSessions {
+    pub fn contains_key(&self, key: &str) -> bool { self.entries.contains_key(key) }
+    pub fn get(&self, key: &str) -> Option<&ResolveSession> { self.entries.get(key) }
+    pub fn remove(&mut self, key: &str) -> Option<ResolveSession> {
+        self.order.retain(|candidate| candidate != key);
+        self.entries.remove(key)
+    }
+    pub fn insert(&mut self, key: String, session: ResolveSession) {
+        if self.entries.contains_key(&key) {
+            self.order.retain(|candidate| candidate != &key);
+        }
+        while self.entries.len() >= MAX_SESSIONS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, session);
+    }
+    pub fn update(&mut self, key: String, session: ResolveSession) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key, session);
+        } else {
+            self.insert(key, session);
+        }
+    }
+}
+
 pub(crate) fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     let active = state.active_account_key(&platform);
@@ -85,12 +123,6 @@ pub(crate) fn load_account_cookie(state: &AppState, platform: Platform, need_log
 fn insert_session(state: &AppState, session: ResolveSession) -> String {
     let key = Uuid::new_v4().to_string();
     let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    // 容量控制：超过上限移除最早插入的会话
-    if sessions.len() >= MAX_SESSIONS {
-        if let Some(oldest) = sessions.keys().next().cloned() {
-            sessions.remove(&oldest);
-        }
-    }
     sessions.insert(key.clone(), session);
     key
 }
@@ -105,7 +137,7 @@ fn get_session(state: &AppState, key: &str) -> AppResult<ResolveSession> {
 
 fn update_session(state: &AppState, key: &str, session: ResolveSession) {
     let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    sessions.insert(key.to_string(), session);
+    sessions.update(key.to_string(), session);
 }
 
 /// 持久化更新平台 Cookie（__puus 刷新后）
@@ -318,7 +350,7 @@ async fn link_reachable(client: &reqwest::Client, url: &str, ua: &str) -> Result
 
 // ---------- 解析入口（建会话 + 首页列表） ----------
 
-pub async fn resolve_share(state: &AppState, text: &str) -> AppResult<ResolveSessionInfo> {
+pub async fn resolve_share(state: &AppState, text: &str, pwd_override: Option<&str>) -> AppResult<ResolveSessionInfo> {
     let parsed = match crate::parser::parse(text) {
         Ok(p) => p,
         Err(e) => {
@@ -326,6 +358,7 @@ pub async fn resolve_share(state: &AppState, text: &str) -> AppResult<ResolveSes
             return Err(e);
         }
     };
+    let parsed = with_pwd_override(parsed, pwd_override);
     let platform = Platform::from_key(&parsed.platform)
         .ok_or_else(|| AppError::Api("未知平台".into()))?;
     state.log(
@@ -360,6 +393,13 @@ pub async fn resolve_share(state: &AppState, text: &str) -> AppResult<ResolveSes
         files,
         has_more,
     })
+}
+
+fn with_pwd_override(mut parsed: crate::models::ParsedShare, pwd_override: Option<&str>) -> crate::models::ParsedShare {
+    if let Some(pwd) = pwd_override.map(str::trim).filter(|pwd| !pwd.is_empty()) {
+        parsed.pwd = pwd.to_string();
+    }
+    parsed
 }
 
 /// 各平台建会话取首页（原 resolve_share 主体）
@@ -876,8 +916,13 @@ pub async fn cleanup_quark(state: &AppState, cleanup_id: &str) {
     if cleanup_id.is_empty() {
         return;
     }
-    if let Ok(cookie) = load_account_cookie(state, Platform::Quark, "") {
-        let _ = quark::delete_file(&state.http, cleanup_id, &cookie).await;
+    match load_account_cookie(state, Platform::Quark, "") {
+        Ok(cookie) => {
+            if let Err(error) = quark::delete_file(&state.http, cleanup_id, &cookie).await {
+                state.log(crate::logger::ERROR, "quark", "cleanup", "临时转存清理失败", &error.to_string());
+            }
+        }
+        Err(error) => state.log(crate::logger::ERROR, "quark", "cleanup", "缺少账号，无法清理临时转存", &error.to_string()),
     }
 }
 
@@ -886,8 +931,38 @@ pub async fn cleanup_baidu(state: &AppState, cleanup_path: &str) {
     if cleanup_path.is_empty() {
         return;
     }
-    if let Ok(cookie) = load_account_cookie(state, Platform::Baidu, "") {
-        let _ = crate::baidupcs::remove(&cookie, cleanup_path, &state.data_dir).await;
+    match load_account_cookie(state, Platform::Baidu, "") {
+        Ok(cookie) => {
+            if let Err(error) = crate::baidupcs::remove(&cookie, cleanup_path, &state.data_dir).await {
+                state.log(crate::logger::ERROR, "baidu", "cleanup", "临时转存清理失败", &error.to_string());
+            }
+        }
+        Err(error) => state.log(crate::logger::ERROR, "baidu", "cleanup", "缺少账号，无法清理临时转存", &error.to_string()),
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{with_pwd_override, ResolveSession, ResolveSessions};
+    use crate::models::{ParsedShare, Platform};
+
+    #[test]
+    fn manual_password_overrides_detected_password() {
+        let parsed = ParsedShare { platform: "quark".into(), share_id: "abc".into(), pwd: "old1".into() };
+        assert_eq!(with_pwd_override(parsed.clone(), Some(" new2 ")).pwd, "new2");
+        assert_eq!(with_pwd_override(parsed, Some("  ")).pwd, "old1");
+    }
+
+    #[test]
+    fn session_eviction_is_fifo() {
+        let mut sessions = ResolveSessions::default();
+        for index in 0..32 {
+            sessions.insert(format!("key-{index}"), ResolveSession::new(Platform::Quark, index.to_string(), String::new()));
+        }
+        sessions.update("key-0".into(), ResolveSession::new(Platform::Quark, "updated".into(), String::new()));
+        sessions.insert("key-32".into(), ResolveSession::new(Platform::Quark, "32".into(), String::new()));
+        assert!(!sessions.contains_key("key-0"));
+        assert!(sessions.contains_key("key-1"));
+        assert!(sessions.contains_key("key-32"));
+    }
+}

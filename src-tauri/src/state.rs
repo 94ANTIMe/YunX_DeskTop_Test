@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use reqwest::Client;
 use rusqlite::Connection;
@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use crate::api::xunlei::XunleiRuntime;
 use crate::error::AppResult;
 use crate::models::Settings;
-use crate::resolve::ResolveSession;
+use crate::resolve::ResolveSessions;
 
 /// 全局应用状态
 pub struct AppState {
@@ -16,13 +16,13 @@ pub struct AppState {
     /// 共享 HTTP 客户端（平台 API）
     pub http: Client,
     /// 解析会话表（sessionKey → 会话）
-    pub sessions: Mutex<std::collections::HashMap<String, ResolveSession>>,
+    pub sessions: Mutex<ResolveSessions>,
     /// 迅雷运行时（token / captcha / 设备指纹）
     pub xunlei: Mutex<XunleiRuntime>,
     /// 应用数据目录（settings.json / xunlei_fp.json）
     pub data_dir: PathBuf,
-    /// 更新流程单飞锁（防重复检查/下载/安装）
-    pub updating: Mutex<bool>,
+    /// 设置内存缓存（剪贴板 1.5s / 轮询 1s / 取链等热点路径免磁盘 IO + DPAPI 解密；save_settings 同步刷新）
+    pub settings_cache: RwLock<Option<Settings>>,
 }
 
 impl AppState {
@@ -40,15 +40,20 @@ impl AppState {
         Ok(Self {
             db: Mutex::new(db),
             http: crate::api::http_client(),
-            sessions: Mutex::new(std::collections::HashMap::new()),
+            sessions: Mutex::new(ResolveSessions::default()),
             xunlei: Mutex::new(XunleiRuntime { fp: xunlei_fp, ..Default::default() }),
             data_dir: data_dir.to_path_buf(),
-            updating: Mutex::new(false),
+            settings_cache: RwLock::new(None),
         })
     }
 
-    /// 读取设置（settings.json；不存在返回默认值；代理密码 DPAPI 解密）
+    /// 读取设置（优先内存缓存；未命中才读 settings.json + DPAPI 解密）
     pub fn load_settings(&self) -> Settings {
+        if let Ok(cache) = self.settings_cache.read() {
+            if let Some(cached) = cache.clone() {
+                return cached;
+            }
+        }
         let mut settings: Settings = std::fs::read_to_string(self.data_dir.join("settings.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -57,7 +62,27 @@ impl AppState {
             settings.proxy_password =
                 crate::crypto::decrypt(&settings.proxy_password).ok().flatten().unwrap_or_default();
         }
+        if let Ok(mut cache) = self.settings_cache.write() {
+            *cache = Some(settings.clone());
+        }
         settings
+    }
+
+    /// IPC 首次读取使用严格模式：已有文件损坏时返回错误，让前端可以展示恢复页。
+    pub fn load_settings_checked(&self) -> AppResult<Settings> {
+        let path = self.data_dir.join("settings.json");
+        if !path.exists() {
+            return Ok(self.load_settings());
+        }
+        let text = std::fs::read_to_string(path)?;
+        let mut settings: Settings = serde_json::from_str(&text)?;
+        if !settings.proxy_password.is_empty() {
+            settings.proxy_password = crate::crypto::decrypt(&settings.proxy_password)?.unwrap_or_default();
+        }
+        if let Ok(mut cache) = self.settings_cache.write() {
+            *cache = Some(settings.clone());
+        }
+        Ok(settings)
     }
 
     /// 保存设置（代理密码 DPAPI 加密后落盘）
@@ -67,7 +92,19 @@ impl AppState {
             to_write.proxy_password = crate::crypto::encrypt(&to_write.proxy_password)?;
         }
         let text = serde_json::to_string_pretty(&to_write)?;
-        std::fs::write(self.data_dir.join("settings.json"), text)?;
+        let destination = self.data_dir.join("settings.json");
+        let temporary = self.data_dir.join("settings.json.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        atomic_replace(&temporary, &destination)?;
+        // 同步刷新内存缓存（保持解密态，与 load_settings 语义一致）
+        if let Ok(mut cache) = self.settings_cache.write() {
+            *cache = Some(settings.clone());
+        }
         Ok(())
     }
 
@@ -90,9 +127,11 @@ impl AppState {
 
     /// 从 DB 加载迅雷 token 到运行时（调用任何 pan 接口前确保）
     pub fn load_xunlei_runtime(&self) -> AppResult<()> {
-        let conn = self.db.lock().map_err(|_| crate::error::AppError::Lock)?;
         let active = self.active_account_key(&crate::models::Platform::Xunlei);
-        let acc = crate::db::accounts::load(&conn, crate::models::Platform::Xunlei, &active)?;
+        let acc = {
+            let conn = self.db.lock().map_err(|_| crate::error::AppError::Lock)?;
+            crate::db::accounts::load(&conn, crate::models::Platform::Xunlei, &active)?
+        };
         let mut rt = self.xunlei.lock().map_err(|_| crate::error::AppError::Lock)?;
         if let Some(crate::db::accounts::Account::Xunlei {
             access_token,
@@ -122,10 +161,14 @@ impl AppState {
 
     /// 把迅雷运行时 token 持久化回 DB（写入当前选中账号行）
     pub fn persist_xunlei_runtime(&self, nickname: &str) -> AppResult<()> {
-        let rt = self.xunlei.lock().map_err(|_| crate::error::AppError::Lock)?;
-        if rt.access_token.is_empty() {
-            return Ok(());
-        }
+        // 快照运行时后立即释放 xunlei 锁：DB 写不再嵌套在 xunlei 锁内（消除与 load_xunlei_runtime 的 ABBA 死锁隐患）
+        let snapshot = {
+            let rt = self.xunlei.lock().map_err(|_| crate::error::AppError::Lock)?;
+            if rt.access_token.is_empty() {
+                return Ok(());
+            }
+            (rt.access_token.clone(), rt.refresh_token.clone(), rt.fp.device_id.clone(), rt.captcha_token.clone())
+        };
         let conn = self.db.lock().map_err(|_| crate::error::AppError::Lock)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -135,14 +178,30 @@ impl AppState {
         crate::db::accounts::save_with_key(
             &conn,
             &crate::db::accounts::Account::Xunlei {
-                access_token: rt.access_token.clone(),
-                refresh_token: rt.refresh_token.clone(),
-                device_id: rt.fp.device_id.clone(),
-                captcha_token: rt.captcha_token.clone(),
+                access_token: snapshot.0,
+                refresh_token: snapshot.1,
+                device_id: snapshot.2,
+                captcha_token: snapshot.3,
                 nickname: nickname.to_string(),
             },
             now,
             &key,
         )
     }
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(destination.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
 }
