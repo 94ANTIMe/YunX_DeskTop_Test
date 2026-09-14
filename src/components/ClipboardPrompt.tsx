@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { ArrowRight, X } from "lucide-react";
 import type { ClipboardShareEvent } from "../lib/ipc";
 import { platformLabel } from "../lib/format";
@@ -11,12 +11,21 @@ interface ClipboardPromptProps {
   onDismiss: () => void;
 }
 
+/** 提示自动消失时长：不遮挡右下角内容，新链接会重置计时 */
+const AUTO_DISMISS_MS = 10_000;
+
 /** 剪贴板命中分享链接的右下角浮层提示 */
 export default function ClipboardPrompt({ share, onResolve, onDismiss }: ClipboardPromptProps) {
   const preview = useMemo(() => {
     const t = share.text.trim();
     return t.length > 56 ? `${t.slice(0, 56)}…` : t;
   }, [share.text]);
+
+  // 自动消失：命中新链接（share 变化）重置计时，避免提示无限期遮挡右下角内容
+  useEffect(() => {
+    const timer = window.setTimeout(onDismiss, AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [share, onDismiss]);
 
   return (
     <div className="animate-rise fixed bottom-5 right-5 z-50 w-80 max-w-[calc(100vw-2.5rem)] overflow-hidden rounded-card border border-ink/10 bg-carrier p-4 shadow-capsule backdrop-blur">

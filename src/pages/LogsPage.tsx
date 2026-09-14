@@ -30,13 +30,19 @@ export default function LogsPage({ active }: { active: boolean }) {
   const [auto, setAuto] = useState(true);
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  /** 上次列表指纹：日志无变化时跳过 setState，3s 轮询不再整列表 reconcile */
+  const sigRef = useRef("");
 
   // showSpinner 仅手动刷新时展示（后台轮询不闪加载态、少一次渲染）
   const refresh = useCallback(async (showSpinner = false) => {
     if (showSpinner) setLoading(true);
     try {
       const list = await ipc.listLogs(filterRef.current || undefined, 500);
-      setLogs(list);
+      const sig = `${list.length}:${list[0]?.id ?? ""}:${list[list.length - 1]?.id ?? ""}`;
+      if (sig !== sigRef.current) {
+        sigRef.current = sig;
+        setLogs(list);
+      }
       setError("");
     } catch (e) {
       setError(errMsg(e));

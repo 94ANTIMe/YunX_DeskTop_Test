@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Loader2,
   Search,
@@ -44,6 +44,8 @@ export default function CrossDriveSearchModal({
   const [results, setResults] = useState<SearchItem[]>([]);
   const [filterPlatform, setFilterPlatform] = useState<string>("all");
   const [error, setError] = useState("");
+  /** 请求序号：后发优先，慢的旧响应不得覆盖新结果 */
+  const searchSeq = useRef(0);
 
   useEffect(() => {
     if (open && filename) {
@@ -54,23 +56,26 @@ export default function CrossDriveSearchModal({
       setResults([]);
       setError("");
     }
-  }, [open, filename]);
+  }, [open, filename]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function doSearch(q: string) {
     const trimmed = q.trim();
-    if (!trimmed) return;
+    if (!trimmed || loading) return;
+    const seq = ++searchSeq.current;
     setLoading(true);
     setError("");
     try {
       const list = await ipc.pansouSearch(trimmed);
+      if (seq !== searchSeq.current) return;
       setResults(list);
       if (list.length === 0) {
         setError("未在其他网盘中检索到同名的有效资源");
       }
     } catch (e) {
+      if (seq !== searchSeq.current) return;
       setError(errMsg(e));
     } finally {
-      setLoading(false);
+      if (seq === searchSeq.current) setLoading(false);
     }
   }
 
@@ -112,7 +117,7 @@ export default function CrossDriveSearchModal({
                 value={keyword}
                 onChange={(e) => setKeyword(e.currentTarget.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") doSearch(keyword);
+                  if (e.key === "Enter" && !loading) doSearch(keyword);
                 }}
                 placeholder="搜索同名资源关键词…"
                 className="h-9 w-full rounded-ctrl border border-ink/10 bg-carrier pl-8 pr-3 text-xs text-ink placeholder:text-ink-soft/60 focus:border-clay focus:outline-none"

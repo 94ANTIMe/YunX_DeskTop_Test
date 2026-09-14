@@ -55,8 +55,8 @@ export default function UpdateBanner({
           <div className="mt-1 flex w-72 items-center gap-2">
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink/10">
               <div
-                className="h-full rounded-full bg-clay transition-all"
-                style={{ width: `${pct}%` }}
+                className="h-full w-full origin-left rounded-full bg-clay transition-transform"
+                style={{ transform: `scaleX(${pct / 100})` }}
               />
             </div>
             <span className="shrink-0 font-mono text-[11px] text-ink-soft">

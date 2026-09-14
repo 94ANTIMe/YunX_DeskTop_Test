@@ -107,6 +107,10 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   /** 批量链接队列面板 */
   const [showBatch, setShowBatch] = useState(false);
   const noticeTimer = useRef<number | undefined>(undefined);
+  /** 解析进行中收到的新请求（后发优先：当前解析结束后自动开始，避免静默丢弃） */
+  const queuedResolve = useRef<{ link: string; pwd: string } | null>(null);
+  /** 解析在飞标志（ref 而非 state：队列续接时闭包内读到的一定是最新值） */
+  const resolvingRef = useRef(false);
 
   const showNotice = (msg: string) => {
     setNotice(msg);
@@ -143,10 +147,16 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     }
   }
 
-  // 解析（text 缺省取输入框内容；搜索页转入时传「链接 + 提取码」组合文本）
+  // 解析（text 缺省取输入框内容；搜索页转入时传「链接 + 提取码」组合文本）。
+  // 解析进行中收到新请求时暂存队列（仅保留最新一条），当前解析结束后自动续接。
   async function resolve(text?: string, pwdOverride?: string) {
     const t = (text ?? input).trim();
-    if (!t || resolving) return;
+    if (!t) return;
+    if (resolvingRef.current) {
+      queuedResolve.current = { link: t, pwd: (pwdOverride ?? pwd).trim() };
+      return;
+    }
+    resolvingRef.current = true;
     setResolving(true);
     setError("");
     try {
@@ -173,7 +183,16 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     } catch (e) {
       setError(errMsg(e));
     } finally {
+      resolvingRef.current = false;
       setResolving(false);
+      // 续接暂存的解析请求（搜索页 / 剪贴板 / 搜同款在解析中转入的场景）
+      const next = queuedResolve.current;
+      if (next) {
+        queuedResolve.current = null;
+        setInput(next.link);
+        setPwd(next.pwd);
+        void resolve(next.link, next.pwd);
+      }
     }
   }
 
@@ -577,9 +596,9 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           </div>
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-carrier-deep">
             <div
-              className="h-full rounded-full bg-clay transition-all duration-300"
+              className="h-full w-full origin-left rounded-full bg-clay transition-transform duration-300"
               style={{
-                width: `${folderProgress.total > 0 ? Math.round((folderProgress.done / folderProgress.total) * 100) : 0}%`,
+                transform: `scaleX(${folderProgress.total > 0 ? Math.min(1, folderProgress.done / folderProgress.total) : 0})`,
               }}
             />
           </div>

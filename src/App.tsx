@@ -134,6 +134,7 @@ export default function App() {
   }, []);
 
   const consumePendingResolve = useCallback(() => setPendingResolve(null), []);
+  const dismissClipShare = useCallback(() => setClipShare(null), []);
 
   const showUpdateBanner = !updateDismissed && !!updater.info?.hasUpdate;
 
@@ -224,7 +225,7 @@ export default function App() {
       </main>
       {/* 剪贴板分享链接提示 */}
       {clipboardOn && clipShare && (
-        <ClipboardPrompt share={clipShare} onResolve={goResolve} onDismiss={() => setClipShare(null)} />
+        <ClipboardPrompt share={clipShare} onResolve={goResolve} onDismiss={dismissClipShare} />
       )}
     </div>
   );

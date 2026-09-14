@@ -382,9 +382,9 @@ export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQu
                         </div>
                         <div className="mt-1 h-1 overflow-hidden rounded-full bg-carrier">
                           <div
-                            className="h-full rounded-full bg-clay transition-all duration-300"
+                            className="h-full w-full origin-left rounded-full bg-clay transition-transform duration-300"
                             style={{
-                              width: `${it.progress.total > 0 ? Math.round(((it.progress.done + it.progress.failed) / it.progress.total) * 100) : 0}%`,
+                              transform: `scaleX(${it.progress.total > 0 ? Math.min(1, (it.progress.done + it.progress.failed) / it.progress.total) : 0})`,
                             }}
                           />
                         </div>
@@ -482,7 +482,7 @@ export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQu
 
         {/* 底部 */}
         <footer className="flex shrink-0 items-center justify-between border-t border-ink/10 px-5 py-3">
-          <p className="text-[10px] text-ink-soft/60">关闭面板即清空队列（不入队的链接不受影响）</p>
+          <p className="text-[10px] text-ink-soft/60">关闭面板仅收起，队列与状态保留（不入队的链接不受影响）</p>
           <button
             onClick={() => {
               onClose();

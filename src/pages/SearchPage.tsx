@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bell, Link2, Loader2, Plus, RefreshCw, Rss, Search as SearchIcon, Trash2, X } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import EmptyState from "../components/EmptyState";
@@ -85,9 +85,12 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
     onGoResolve(item.url, item.password);
   }
 
+  // 先清掉上一个定时器：连续操作时旧提示不得提前清掉新提示
+  const noticeTimer = useRef<number | undefined>(undefined);
   function flashNotice(text: string) {
     setNotice(text);
-    window.setTimeout(() => setNotice(""), 4000);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 4000);
   }
 
   // ---------- 订阅操作 ----------

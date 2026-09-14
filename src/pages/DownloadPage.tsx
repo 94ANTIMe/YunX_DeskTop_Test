@@ -53,19 +53,34 @@ function taskEquals(a: DownloadTask, b: DownloadTask): boolean {
   );
 }
 
-/** 事件任务合并：无变化复用旧对象引用（memo 行组件与抽屉才能跳过重渲染）；整体无变化返回 null（调用方跳过 setState） */
+/** 与后端一致的展示排序：进行中（0/1/2）优先，其后按 id 倒序 */
+function compareTasks(a: DownloadTask, b: DownloadTask): number {
+  const active = (s: number) => (s === 0 || s === 1 || s === 2 ? 0 : 1);
+  return active(a.status) - active(b.status) || b.id - a.id;
+}
+
+/** 事件任务合并：无变化复用旧对象引用（memo 行组件与抽屉才能跳过重渲染）；整体无变化返回 null（调用方跳过 setState）。
+ *  终态任务若从事件快照中消失（滑出 24h 窗口 / 已在别处删除）同步移除，避免留下进度冻结的僵尸行。 */
 function mergeTasks(prev: DownloadTask[], updated: DownloadTask[]): DownloadTask[] | null {
   let changed = false;
   const byId = new Map(prev.map((t) => [t.id, t]));
+  const seen = new Set<number>();
   for (const t of updated) {
+    seen.add(t.id);
     const old = byId.get(t.id);
     if (!old || !taskEquals(old, t)) {
       byId.set(t.id, t);
       changed = true;
     }
   }
+  for (const [id, t] of byId) {
+    if (!seen.has(id) && (t.status === 3 || t.status === 4)) {
+      byId.delete(id);
+      changed = true;
+    }
+  }
   if (!changed) return null;
-  return [...byId.values()].sort((a, b) => b.id - a.id);
+  return [...byId.values()].sort(compareTasks);
 }
 
 interface TaskCardProps {
@@ -200,14 +215,14 @@ const TaskCard = memo(function TaskCard({
         </div>
       </div>
 
-      {/* 进度条 */}
+      {/* 进度条（scaleX 合成层动画，避免每秒 width 变化触发布局重排） */}
       {!done && (
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-carrier-deep">
           <div
-            className={`h-full rounded-full transition-all duration-300 ${
+            className={`h-full w-full origin-left rounded-full transition-transform duration-300 ${
               failed ? "bg-clay-deep" : "bg-clay"
             }`}
-            style={{ width: `${pct}%` }}
+            style={{ transform: `scaleX(${pct / 100})` }}
           />
         </div>
       )}

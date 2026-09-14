@@ -207,6 +207,14 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
   const updater = useUpdate();
   // 开源致谢折叠状态：仅保留于当前应用会话（重启后收起；切换设置页不卸载故状态保留）
   const [ackOpen, setAckOpen] = useState(false);
+  const noticeTimer = useRef<number | undefined>(undefined);
+
+  /** 带自动消失的提示：先清掉上一个定时器，避免旧提示把新提示提前清掉 */
+  function flashNotice(msg: string, ms = 3500) {
+    setNotice(msg);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), ms);
+  }
 
   // 初始加载失败时保留错误，由恢复页显式重试。
   async function loadSettings() {
@@ -237,8 +245,7 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
         const result = await ipc.updateSettings(snapshot);
         // 设置已保存；仅当下载引擎同步失败时给非阻塞提示（重启引擎后生效），不报错、不回滚
         if (result?.engineSyncFailed) {
-          setNotice(`设置已保存；下载引擎暂未同步（${result.engineSyncError || "引擎未响应"}）`);
-          window.setTimeout(() => setNotice(""), 6000);
+          flashNotice(`设置已保存；下载引擎暂未同步（${result.engineSyncError || "引擎未响应"}）`, 6000);
         }
       } catch (cause) {
         setError(`${errMsg(cause)}；已重新读取后端设置`);
@@ -321,8 +328,7 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
       const dir = typeof selected === "string" ? selected : selected?.[0];
       if (dir) {
         await persist({ ...settings, downloadDir: dir });
-        setNotice("下载目录已更新（新任务生效）");
-        window.setTimeout(() => setNotice(""), 3500);
+        flashNotice("下载目录已更新（新任务生效）");
       }
     } catch (e) {
       setError(errMsg(e));
@@ -334,8 +340,7 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
     if (!settings) return;
     const trimmed = url.trim().replace(/\/+$/, "");
     await persist({ ...settings, pansouBaseUrl: trimmed });
-    setNotice(trimmed ? "搜索服务地址已保存" : "已清除搜索服务地址");
-    window.setTimeout(() => setNotice(""), 3500);
+    flashNotice(trimmed ? "搜索服务地址已保存" : "已清除搜索服务地址");
   }
 
   function goSearchTab() {
@@ -496,7 +501,11 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   onChange={(e) => setSettings({ ...s, downloadThreads: Number(e.currentTarget.value) })}
                   onMouseUp={(e) => persist({ ...s, downloadThreads: Number((e.currentTarget as HTMLInputElement).value) })}
                   onTouchEnd={(e) => persist({ ...s, downloadThreads: Number((e.currentTarget as HTMLInputElement).value) })}
-                  className="w-44 accent-[#d97757]"
+                  onBlur={(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (v !== s.downloadThreads) persist({ ...s, downloadThreads: v });
+                  }}
+                  className="w-44 accent-clay"
                 />
                 <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadThreads}</span>
               </dd>
@@ -513,7 +522,11 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   value={s.maxConcurrentDownloads}
                   onChange={(e) => setSettings({ ...s, maxConcurrentDownloads: Number(e.currentTarget.value) })}
                   onMouseUp={(e) => persist({ ...s, maxConcurrentDownloads: Number((e.currentTarget as HTMLInputElement).value) })}
-                  className="w-44 accent-[#d97757]"
+                  onBlur={(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (v !== s.maxConcurrentDownloads) persist({ ...s, maxConcurrentDownloads: v });
+                  }}
+                  className="w-44 accent-clay"
                 />
                 <span className="w-8 text-right font-mono text-sm text-ink">{s.maxConcurrentDownloads}</span>
               </dd>
@@ -549,7 +562,11 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   value={s.downloadRetryCount}
                   onChange={(e) => setSettings({ ...s, downloadRetryCount: Number(e.currentTarget.value) })}
                   onMouseUp={(e) => persist({ ...s, downloadRetryCount: Number((e.currentTarget as HTMLInputElement).value) })}
-                  className="w-44 accent-[#d97757]"
+                  onBlur={(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (v !== s.downloadRetryCount) persist({ ...s, downloadRetryCount: v });
+                  }}
+                  className="w-44 accent-clay"
                 />
                 <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadRetryCount}</span>
               </dd>
@@ -569,7 +586,11 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   value={s.downloadMinSplitMb}
                   onChange={(e) => setSettings({ ...s, downloadMinSplitMb: Number(e.currentTarget.value) })}
                   onMouseUp={(e) => persist({ ...s, downloadMinSplitMb: Number((e.currentTarget as HTMLInputElement).value) })}
-                  className="w-44 accent-[#d97757]"
+                  onBlur={(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (v !== s.downloadMinSplitMb) persist({ ...s, downloadMinSplitMb: v });
+                  }}
+                  className="w-44 accent-clay"
                 />
                 <span className="w-12 text-right font-mono text-sm text-ink">{s.downloadMinSplitMb} MB</span>
               </dd>
@@ -589,7 +610,11 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   value={s.downloadConnPerServer}
                   onChange={(e) => setSettings({ ...s, downloadConnPerServer: Number(e.currentTarget.value) })}
                   onMouseUp={(e) => persist({ ...s, downloadConnPerServer: Number((e.currentTarget as HTMLInputElement).value) })}
-                  className="w-44 accent-[#d97757]"
+                  onBlur={(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (v !== s.downloadConnPerServer) persist({ ...s, downloadConnPerServer: v });
+                  }}
+                  className="w-44 accent-clay"
                 />
                 <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadConnPerServer}</span>
               </dd>
@@ -912,13 +937,13 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                 <div className="mb-3 flex items-center gap-2">
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink/10">
                     <div
-                      className="h-full rounded-full bg-clay transition-all"
+                      className="h-full w-full origin-left rounded-full bg-clay transition-transform"
                       style={{
-                        width: `${
+                        transform: `scaleX(${
                           updater.progress.total > 0
-                            ? Math.min(100, (updater.progress.received / updater.progress.total) * 100)
+                            ? Math.min(1, updater.progress.received / updater.progress.total)
                             : 0
-                        }%`,
+                        })`,
                       }}
                     />
                   </div>

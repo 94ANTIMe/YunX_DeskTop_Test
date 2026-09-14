@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -42,6 +42,7 @@ export default function PanFileManager({
   const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const noticeTimer = useRef<number | undefined>(undefined);
 
   const currentDir = crumbs[crumbs.length - 1];
 
@@ -86,7 +87,8 @@ export default function PanFileManager({
         link.mirrors || undefined,
       );
       setNotice(`已加入下载队列：${link.filename || file.fname}`);
-      setTimeout(() => setNotice(""), 3000);
+      window.clearTimeout(noticeTimer.current);
+      noticeTimer.current = window.setTimeout(() => setNotice(""), 3000);
       onNavigate("download");
     } catch (e) {
       setError(errMsg(e));
