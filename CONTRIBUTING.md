@@ -19,6 +19,7 @@ pnpm build         # 交付前验证 tsc + vite 构建
 
 ## 变更流程（对 AI 与人类同等适用）
 
+0. **接手与断点**：开始前读 [docs/Handed-docs.md](docs/Handed-docs.md) 断点区（有在途任务默认续做）；多阶段任务先建断点块，结束后写时间轴（协议见 [AGENTS.md](AGENTS.md)「接手文档」）。
 1. **需求与验收条件**：先明确要改什么、怎样算完成。没有验收条件的修改不开始。
 2. **影响分析**：按 [architecture.md](docs/project/architecture.md) 判断改动落在哪几层；涉及 IPC / settings / 数据库时读 [interfaces-and-compat.md](docs/project/interfaces-and-compat.md)。
 3. **实现**：遵守 [AGENTS.md](AGENTS.md) 硬性约束；不与本次需求无关的顺手重构。

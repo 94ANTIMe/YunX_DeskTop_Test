@@ -214,18 +214,30 @@ jobs:
             echo "GitCode Release ${TAG} 已存在，跳过创建"
           fi
 
-          # 2. 上传每个资产：get upload_url → PUT
-          for FILE in dist/*.exe dist/*.msi; do
-            [ -f "$FILE" ] || continue
+          # 2. 上传每个资产：get upload_url → PUT（响应头/URL 不经 eval 拼接，杜绝注入）
+          upload_asset() {
+            local FILE="$1" NAME UPLOAD_INFO UPLOAD_URL
             NAME=$(basename "$FILE")
             echo "上传 $NAME ..."
             UPLOAD_INFO=$(curl -fsS \
               -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" \
               "https://api.gitcode.com/api/v5/repos/${REPO}/releases/${TAG}/upload_url?file_name=${NAME}")
             UPLOAD_URL=$(echo "$UPLOAD_INFO" | jq -r '.url')
-            HDRS=$(echo "$UPLOAD_INFO" | jq -r '.headers | to_entries | map("-H " + ("\"" + .key + ": " + .value + "\"")) | join(" ")')
-            eval "curl -fsS -o /dev/null -X PUT $HDRS --data-binary @\"$FILE\" \"$UPLOAD_URL\""
+            case "$UPLOAD_URL" in
+              https://*gitcode.com/*) : ;;
+              *) echo "!! 非预期的上传地址，拒绝上传 $NAME：${UPLOAD_URL}"; return 1 ;;
+            esac
+            local ARGS=(curl -fsS -o /dev/null -X PUT --data-binary @"$FILE" "$UPLOAD_URL")
+            while IFS=$'\t' read -r K V; do
+              [ -n "$K" ] && ARGS+=(-H "$K: $V")
+            done < <(echo "$UPLOAD_INFO" | jq -r '.headers | to_entries[] | [.key, .value] | @tsv')
+            "${ARGS[@]}"
             echo "  → $NAME 上传完成"
+          }
+
+          for FILE in dist/*.exe dist/*.msi; do
+            [ -f "$FILE" ] || continue
+            upload_asset "$FILE"
           done
 
           # 3. 镜像 latest.json（平台 URL 改写为 GitCode），供应用内更新器 GitHub 失败时回退
@@ -233,14 +245,7 @@ jobs:
             echo "上传 latest.json（URL 改写为 GitCode）..."
             sed "s#https://github.com/${{ github.repository }}/releases/download/#https://gitcode.com/${REPO}/releases/download/#g" \
               dist/latest.json > dist/latest.gitcode.json
-            NAME="latest.json"
-            UPLOAD_INFO=$(curl -fsS \
-              -H "PRIVATE-TOKEN: ${TOKEN}" -H "Accept: application/json" \
-              "https://api.gitcode.com/api/v5/repos/${REPO}/releases/${TAG}/upload_url?file_name=${NAME}")
-            UPLOAD_URL=$(echo "$UPLOAD_INFO" | jq -r '.url')
-            HDRS=$(echo "$UPLOAD_INFO" | jq -r '.headers | to_entries | map("-H " + ("\"" + .key + ": " + .value + "\"")) | join(" ")')
-            eval "curl -fsS -o /dev/null -X PUT $HDRS --data-binary @\"dist/latest.gitcode.json\" \"$UPLOAD_URL\""
-            echo "  → latest.json 上传完成"
+            upload_asset dist/latest.gitcode.json
           else
             echo "!! dist/latest.json 不存在，GitCode 回退源不可用（更新器将只走 GitHub）"
           fi
