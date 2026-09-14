@@ -31,6 +31,12 @@ pub fn init(data_dir: &Path) -> AppResult<Connection> {
         "ALTER TABLE download_task ADD COLUMN mirrors_json TEXT NOT NULL DEFAULT '[]'",
         [],
     );
+    // 轮询窗口查询索引：poll_loop 每秒按 (status, finish_time) 过滤，
+    // download_task 无索引时该查询是每秒一次的全表扫描（已配 7 天终态自动清理防膨胀）
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_task_status_finish ON download_task (status, finish_time)",
+        [],
+    );
     // v0.2 迅雷指纹持久化（文件方式，见 xunlei 模块）无表变更
     Ok(conn)
 }

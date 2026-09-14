@@ -66,10 +66,15 @@ pub(crate) async fn run_commands(data_dir: &std::path::Path, commands: &[String]
             input.push_str(c);
             input.push('\n');
         }
-        stdin
-            .write_all(input.as_bytes())
-            .await
-            .map_err(|e| AppError::Api(format!("百度下载组件交互失败: {e}")))?;
+        // 写入同样纳入超时：子进程异常不消费 stdin 且写满管道缓冲时，
+        // 无超时的 write_all 会永久挂起并持有 RUN_LOCK，堵死全部百度取链/清理
+        tokio::time::timeout(Duration::from_secs(10), async {
+            stdin.write_all(input.as_bytes()).await?;
+            stdin.flush().await
+        })
+        .await
+        .map_err(|_| AppError::Api("百度下载组件命令写入超时".into()))?
+        .map_err(|e| AppError::Api(format!("百度下载组件交互失败: {e}")))?;
     }
 
     let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())

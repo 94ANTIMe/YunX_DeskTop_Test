@@ -248,16 +248,54 @@ fn is_transient_rpc_error(msg: &str) -> bool {
         || msg.contains("下载引擎响应解析失败")
 }
 
-/// 发起 JSON-RPC 请求：Unauthorized 走引擎自愈重拉，瞬时传输失败短退避重试一次
+/// 连接级失败（请求发不出去：引擎进程死亡 / 端口无人监听），是「引擎已死」的信号
+fn is_connection_error(msg: &str) -> bool {
+    msg.contains("下载引擎通信失败")
+}
+
+/// 引擎自愈互斥：并发 rpc_call 同时触发重拉时只执行一次，其余排队后复检
+static HEAL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+/// 重拉冷却：spawn 失败（依赖缺失等）时避免 poll_loop 每秒风暴式重拉
+static LAST_RESPAWN: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+fn heal_lock() -> &'static tokio::sync::Mutex<()> {
+    HEAL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// 查杀端口遗留进程并重拉引擎（互斥 + 5 秒冷却）。
+/// 拿到锁后先复检引擎健康——并发场景下可能已有其他调用方完成自愈。
+async fn respawn_engine(app: &AppHandle) -> bool {
+    let _guard = heal_lock().lock().await;
+    if rpc_call_raw("aria2.getVersion", vec![]).await.is_ok() {
+        return true;
+    }
+    {
+        let cell = LAST_RESPAWN.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut last) = cell.lock() else {
+            return false;
+        };
+        if let Some(t) = *last {
+            if t.elapsed() < std::time::Duration::from_secs(5) {
+                return false;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    engine_log(app, "respawn_engine: 引擎无响应，查杀遗留进程后重拉");
+    // netstat/tasklist/taskkill 是同步子进程，放 blocking 线程执行，避免冻结 tokio worker
+    let _ = tokio::task::spawn_blocking(|| kill_stale_aria2_on_port(RPC_PORT)).await;
+    spawn_sidecar(app).await
+}
+
+/// 发起 JSON-RPC 请求：Unauthorized / 连接级失败走互斥自愈重拉（引擎崩溃不再永久停摆），
+/// 瞬时传输失败短退避重试一次
 async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
     match rpc_call_raw(method, params.clone()).await {
         Ok(v) => Ok(v),
         Err(AppError::Api(msg)) if msg.contains("Unauthorized") => {
             if let Some(app) = APP_HANDLE.get() {
                 engine_log(app, "rpc_call: 遇到 Unauthorized 鉴权失败，触发下载引擎自愈机制");
-                // netstat/tasklist/taskkill 是同步子进程，放 blocking 线程执行，避免冻结 tokio worker
-                let _ = tokio::task::spawn_blocking(|| kill_stale_aria2_on_port(RPC_PORT)).await;
-                if spawn_sidecar(app).await {
+                if respawn_engine(app).await {
                     engine_log(app, "rpc_call: 引擎自愈重拉成功，重试原 RPC 请求");
                     return rpc_call_raw(method, params).await;
                 }
@@ -266,14 +304,25 @@ async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Value> {
         }
         Err(AppError::Api(msg)) if is_transient_rpc_error(&msg) => {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            match rpc_call_raw(method, params).await {
+            match rpc_call_raw(method, params.clone()).await {
                 Ok(v) => {
                     if let Some(app) = APP_HANDLE.get() {
                         engine_log(app, "rpc_call: 瞬时通信失败已重试成功");
                     }
                     Ok(v)
                 }
-                Err(second) => Err(second),
+                // 重试仍是连接级失败：引擎进程多半已崩溃 / 被杀，自愈重拉后再试最后一次
+                Err(second) => {
+                    if is_connection_error(&second.to_string()) {
+                        if let Some(app) = APP_HANDLE.get() {
+                            if respawn_engine(app).await {
+                                engine_log(app, "rpc_call: 引擎无响应已自愈重拉，重试原 RPC 请求");
+                                return rpc_call_raw(method, params).await;
+                            }
+                        }
+                    }
+                    Err(second)
+                }
             }
         }
         Err(e) => Err(e),
@@ -508,6 +557,44 @@ fn proxy_log_summary(settings: &Settings) -> String {
 
 // ---------- 任务入队 / 控制 ----------
 
+/// Windows 保留设备名（不区分大小写，命中带扩展名形式如 nul.txt 的主干即可）
+fn is_windows_reserved_name(comp: &str) -> bool {
+    let stem = comp.split('.').next().unwrap_or(comp);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
+/// 净化入队文件名（aria2 `out` 参数与删除原语共用，DB 存净化值）：
+/// 剥离 `..` / 独立盘符等路径分量（防直链文件名把文件写出下载目录），
+/// 保留 `relDir/文件名` 的子目录结构；处理 Windows 保留名与尾点尾空格；全空回退 download.bin。
+pub fn sanitize_out_path(name: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for raw in name.split(['/', '\\']) {
+        let comp = raw.trim().trim_end_matches('.').trim_end();
+        // 空分量 / 当前目录 / 上级目录 / 盘符（如 "C:"）一律丢弃
+        if comp.is_empty() || comp == "." || comp == ".." {
+            continue;
+        }
+        let bytes = comp.as_bytes();
+        if bytes.len() == 2 && bytes[1] == b':' {
+            continue;
+        }
+        if is_windows_reserved_name(comp) {
+            parts.push(format!("_{comp}"));
+        } else {
+            parts.push(comp.to_string());
+        }
+    }
+    if parts.is_empty() {
+        return "download.bin".to_string();
+    }
+    parts.join("/")
+}
+
 async fn mark_enqueue_failed(app: &AppHandle, id: i64, message: &str) {
     let state = app.state::<AppState>();
     let finish_time = std::time::SystemTime::now()
@@ -593,7 +680,7 @@ async fn add_to_aria2(
     } else {
         json!({
             "dir": dir.display().to_string(),
-            "out": file_name,
+            "out": sanitize_out_path(file_name),
             "header": header_list,
             "split": split,
             "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
@@ -641,6 +728,8 @@ pub async fn enqueue(
     mirrors: Vec<String>,
 ) -> AppResult<i64> {
     let state = app.state::<AppState>();
+    // 入库前净化：删除原语（delete_local 拼路径）与重启恢复共用 DB 值，必须与 aria2 out 一致
+    let file_name = sanitize_out_path(file_name);
     let headers_json = serde_json::to_string(&headers)?;
     let mirrors_json = serde_json::to_string(&mirrors)?;
     let now = std::time::SystemTime::now()
@@ -657,12 +746,25 @@ pub async fn enqueue(
         )?
     };
 
-    if let Err(error) = add_to_aria2(app, id, url, file_name, headers, platform, cleanup_id, start_paused, mirrors).await {
+    if let Err(error) = add_to_aria2(app, id, url, &file_name, headers, platform, cleanup_id, start_paused, mirrors).await {
         mark_enqueue_failed(app, id, &error.to_string()).await;
         cleanup_transfer(&state, platform, cleanup_id).await;
         return Err(error);
     }
     Ok(id)
+}
+
+/// BT 任务（magnet / .torrent）共用的 aria2 选项
+fn torrent_options(app: &AppHandle) -> AppResult<Value> {
+    let state = app.state::<AppState>();
+    let settings = state.load_settings();
+    let dir = resolve_download_dir(app, &settings);
+    Ok(json!({
+        "dir": dir.display().to_string(),
+        "continue": "true",
+        "bt-tracker": current_bt_trackers(),
+        "seed-time": "0",
+    }))
 }
 
 /// 提交本地 BT 种子文件（.torrent）入队下载
@@ -674,15 +776,7 @@ pub async fn enqueue_torrent(
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(torrent_bytes);
     let state = app.state::<AppState>();
-    let settings = state.load_settings();
-    let dir = resolve_download_dir(app, &settings);
-
-    let options = json!({
-        "dir": dir.display().to_string(),
-        "continue": "true",
-        "bt-tracker": current_bt_trackers(),
-        "seed-time": "0",
-    });
+    let options = torrent_options(app)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -698,6 +792,11 @@ pub async fn enqueue_torrent(
             |r| r.get::<_, i64>(0),
         )?
     };
+
+    // 种子字节落盘：重启后 "torrent:文件名" 伪 URL 无法断点恢复，靠这份副本重新 addTorrent
+    let torrents_dir = state.data_dir.join("torrents");
+    let _ = std::fs::create_dir_all(&torrents_dir);
+    let _ = std::fs::write(torrents_dir.join(format!("{id}.torrent")), torrent_bytes);
 
     let gid = match rpc_call("aria2.addTorrent", vec![json!(b64), json!([]), options]).await {
         Ok(v) => v.as_str().unwrap_or("").to_string(),
@@ -783,10 +882,10 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
 /// 删除任务（aria2 remove + DB 删除 + 转存清理）
 pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<()> {
     let state = app.state::<AppState>();
-    let (gid, file_name, cleanup_id, platform, save_path) = {
+    let (gid, url, file_name, cleanup_id, platform, save_path) = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "SELECT gid, file_name, cleanup_id, platform, save_path FROM download_task WHERE id = ?1",
+            "SELECT gid, url, file_name, cleanup_id, platform, save_path FROM download_task WHERE id = ?1",
             rusqlite::params![id],
             |r| {
                 Ok((
@@ -795,6 +894,7 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         )
@@ -806,7 +906,7 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
     }
     if delete_local && !file_name.is_empty() {
         let path = if save_path.is_empty() {
-            resolve_download_dir(app, &state.load_settings()).join(&file_name)
+            resolve_download_dir(app, &state.load_settings()).join(sanitize_out_path(&file_name))
         } else {
             std::path::PathBuf::from(&save_path)
         };
@@ -818,6 +918,10 @@ pub async fn remove(app: &AppHandle, id: i64, delete_local: bool) -> AppResult<(
     {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.execute("DELETE FROM download_task WHERE id = ?1", rusqlite::params![id])?;
+    }
+    // BT 任务顺带清理落盘的种子副本
+    if url.starts_with("torrent:") {
+        let _ = std::fs::remove_file(state.data_dir.join("torrents").join(format!("{id}.torrent")));
     }
     // 删除任务同样触发夸克 / 百度转存清理（用户放弃下载）
     cleanup_transfer(&state, &platform, &cleanup_id).await;
@@ -843,6 +947,8 @@ pub async fn clear_all(app: &AppHandle) -> AppResult<()> {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.execute("DELETE FROM download_task", [])?;
     }
+    // 全部清空时顺带移除 BT 种子副本目录
+    let _ = std::fs::remove_dir_all(state.data_dir.join("torrents"));
     for (_, platform, cleanup_id) in &tasks {
         cleanup_transfer(&state, platform, cleanup_id).await;
     }
@@ -914,11 +1020,11 @@ async fn update_status(app: &AppHandle, id: i64, status: i32, error_msg: &str) -
 }
 
 trait OptionalRow {
-    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String)>>;
+    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String, String)>>;
 }
 
-impl OptionalRow for rusqlite::Result<(String, String, String, String, String)> {
-    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String)>> {
+impl OptionalRow for rusqlite::Result<(String, String, String, String, String, String)> {
+    fn optional_row(self) -> AppResult<Option<(String, String, String, String, String, String)>> {
         match self {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -929,13 +1035,73 @@ impl OptionalRow for rusqlite::Result<(String, String, String, String, String)> 
 
 // ---------- 启动恢复 + 轮询 ----------
 
-/// 恢复未完成任务（重新 addUri，paused 状态的以暂停态入队）
+/// 引擎当前任务表中的存活 gid（active + waiting；waiting 含 paused）。
+/// 复用存活引擎启动时，旧 gid 可能仍有效——先查表防止重复 addUri 造成同文件二次下载。
+async fn live_engine_gids() -> std::collections::HashSet<String> {
+    let mut gids = std::collections::HashSet::new();
+    let mut collect = |v: Value| {
+        if let Some(arr) = v.as_array() {
+            for item in arr {
+                if let Some(g) = item.get("gid").and_then(|g| g.as_str()) {
+                    gids.insert(g.to_string());
+                }
+            }
+        }
+    };
+    if let Ok(v) = rpc_call("aria2.tellActive", vec![]).await {
+        collect(v);
+    }
+    if let Ok(v) = rpc_call("aria2.tellWaiting", vec![json!(0), json!(1000)]).await {
+        collect(v);
+    }
+    gids
+}
+
+/// 恢复单个 BT 种子任务：从落盘种子副本重新 addTorrent（url 列是 "torrent:文件名" 伪地址，无法 addUri）
+async fn resume_torrent_task(app: &AppHandle, id: i64) {
+    let state = app.state::<AppState>();
+    let torrent_path = state.data_dir.join("torrents").join(format!("{id}.torrent"));
+    let bytes = match tokio::fs::read(&torrent_path).await {
+        Ok(b) => b,
+        Err(_) => {
+            let msg = "种子文件已丢失，请重新添加该 BT 任务";
+            eprintln!("[yunx] 恢复任务 {id} 失败: {msg}");
+            let _ = update_status(app, id, DownloadTaskView::STATUS_FAILED, msg).await;
+            return;
+        }
+    };
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let Ok(options) = torrent_options(app) else {
+        return;
+    };
+    match rpc_call("aria2.addTorrent", vec![json!(b64), json!([]), options]).await {
+        Ok(v) => {
+            let gid = v.as_str().unwrap_or("").to_string();
+            if !gid.is_empty() {
+                let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = conn.execute(
+                    "UPDATE download_task SET gid = ?1 WHERE id = ?2",
+                    rusqlite::params![gid, id],
+                );
+            }
+        }
+        Err(e) => {
+            let _ = update_status(app, id, DownloadTaskView::STATUS_FAILED, &e.to_string()).await;
+        }
+    }
+}
+
+/// 恢复未完成任务：
+/// - BT 种子文件任务从落盘副本重加；副本丢失则明确置败（而非喂非法 URL 静默失败）
+/// - 引擎仍认识旧 gid（复用存活实例）时保持原绑定，不重复入队
+/// - 其余（gid 失效 / 空）清 gid 重新 addUri，paused 状态的以暂停态入队
 async fn resume_pending_tasks(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let rows: Vec<(i64, String, String, String, String, String, String, bool)> = {
+    let rows: Vec<(i64, String, String, String, String, String, String, String, bool)> = {
         let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status \
+            "SELECT id, gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status \
              FROM download_task WHERE status IN (0, 1, 2)",
         ) {
             Ok(s) => s,
@@ -951,14 +1117,25 @@ async fn resume_pending_tasks(app: &AppHandle) {
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
-                    r.get::<_, i32>(7)? == DownloadTaskView::STATUS_PAUSED,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, i32>(8)? == DownloadTaskView::STATUS_PAUSED,
                 ))
             })
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default();
         rows
     };
-    for (id, url, file_name, headers_json, platform, cleanup_id, mirrors_json, was_paused) in rows {
+    let live = live_engine_gids().await;
+    for (id, gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, was_paused) in rows {
+        // BT 种子文件任务：走 addTorrent 恢复
+        if url.starts_with("torrent:") {
+            resume_torrent_task(app, id).await;
+            continue;
+        }
+        // 引擎仍在处理该任务（复用存活实例 / 热重启）：保持原 gid 绑定即可
+        if !gid.is_empty() && live.contains(&gid) {
+            continue;
+        }
         let headers: Vec<(String, String)> =
             serde_json::from_str(&headers_json).unwrap_or_default();
         let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
@@ -1107,13 +1284,31 @@ fn views_fingerprint(views: &[DownloadTaskView]) -> String {
     fp
 }
 
+/// 终态任务保留 7 天后自动清理（查询窗口为 24h；7 天缓冲供翻旧账）。
+/// download_task 无限增长会让 poll_loop 每秒的窗口查询线性变慢，这里兜底删除。
+fn cleanup_expired_tasks(state: &AppState) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let cutoff = now_ms.saturating_sub(7 * 24 * 3600 * 1000);
+    if let Ok(conn) = state.db.lock() {
+        let _ = conn.execute(
+            "DELETE FROM download_task WHERE status IN (3, 4) AND finish_time > 0 AND finish_time < ?1",
+            rusqlite::params![cutoff],
+        );
+    }
+}
+
 /// 轮询循环：批量拉取任务状态 → 变更检测后事件推送 + DB 节流写
 /// 有进行中任务时 1s 一轮，空闲降为 3s；内容无变化不 emit、不动托盘
 async fn poll_loop(app: AppHandle) {
     let mut last_persist = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut last_tracker_refresh = std::time::Instant::now();
+    let mut last_cleanup = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     let mut last_emit_fp = String::new();
     let mut last_tray: (usize, i64) = (0, 0);
+    let mut last_tray_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut interval_secs = 1u64;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
@@ -1126,6 +1321,12 @@ async fn poll_loop(app: AppHandle) {
                 let app2 = app.clone();
                 tauri::async_runtime::spawn(async move { refresh_trackers(&app2).await });
             }
+        }
+
+        // 每小时清理超期终态任务（持锁窗口仅一条 DELETE）
+        if last_cleanup.elapsed() >= std::time::Duration::from_secs(3600) {
+            last_cleanup = std::time::Instant::now();
+            cleanup_expired_tasks(&state);
         }
 
         // 读取进行中任务 + 24h 内终态任务（进行中优先占用 LIMIT 名额）
@@ -1183,6 +1384,8 @@ async fn poll_loop(app: AppHandle) {
 
         let mut views: Vec<DownloadTaskView> = Vec::new();
         let mut persist_due = last_persist.elapsed() >= std::time::Duration::from_secs(2);
+        // 节流进度落盘先收集、循环后单事务批量写（50 任务从 50 个写事务降到 1 个）
+        let mut progress_updates: Vec<(i64, i32, i64, i64, String)> = Vec::new();
 
         for row in rows {
             let Row {
@@ -1256,16 +1459,24 @@ async fn poll_loop(app: AppHandle) {
                         .body(file_name.clone())
                         .show();
                 }
-                if platform == "quark" && !cleanup_id.is_empty() {
-                    let state_ref = app.state::<AppState>();
-                    crate::resolve::cleanup_quark(&state_ref, &cleanup_id).await;
-                } else if platform == "baidu" && !cleanup_id.is_empty() {
-                    let state_ref = app.state::<AppState>();
-                    crate::resolve::cleanup_baidu(&state_ref, &cleanup_id).await;
+                // 转存清理与完成后动作移出轮询循环异步执行：baidupcs 清理（秒级）与 10s
+                // 睡眠不再阻塞进度轮询，其余任务的进度/完成事件不再被拖住
+                if !cleanup_id.is_empty() {
+                    let app2 = app.clone();
+                    let plat = platform.clone();
+                    let cid = cleanup_id.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state_ref = app2.state::<AppState>();
+                        cleanup_transfer(&state_ref, &plat, &cid).await;
+                    });
                 }
                 // 下载完成后动作（关机 / 睡眠；仅当无其他进行中任务时触发）
                 if let Some(action) = pending_after_complete(&state) {
-                    run_after_complete_action(&app, &action, &file_name).await;
+                    let app2 = app.clone();
+                    let last_file = file_name.clone();
+                    tauri::async_runtime::spawn(async move {
+                        run_after_complete_action(&app2, &action, &last_file).await;
+                    });
                 }
             } else if new_status == DownloadTaskView::STATUS_FAILED && db_status != DownloadTaskView::STATUS_FAILED {
                 {
@@ -1294,12 +1505,8 @@ async fn poll_loop(app: AppHandle) {
                         .show();
                 }
             } else if persist_due {
-                // 节流持久化进度
-                let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = conn.execute(
-                    "UPDATE download_task SET status = ?1, total_size = ?2, downloaded_size = ?3, save_path = ?4 WHERE id = ?5",
-                    rusqlite::params![new_status, status.total, status.completed, save_path, id],
-                );
+                // 节流持久化进度：先收集，循环结束后统一单事务写入
+                progress_updates.push((id, new_status, status.total, status.completed, save_path.clone()));
             }
 
             views.push(DownloadTaskView {
@@ -1318,6 +1525,20 @@ async fn poll_loop(app: AppHandle) {
             });
         }
 
+        // 进度批量落盘：单事务替代逐行 autocommit UPDATE
+        if persist_due && !progress_updates.is_empty() {
+            if let Ok(mut conn) = state.db.lock() {
+                if let Ok(tx) = conn.transaction() {
+                    for (id, st, total, done, sp) in &progress_updates {
+                        let _ = tx.execute(
+                            "UPDATE download_task SET status = ?1, total_size = ?2, downloaded_size = ?3, save_path = ?4 WHERE id = ?5",
+                            rusqlite::params![st, total, done, sp, id],
+                        );
+                    }
+                    let _ = tx.commit();
+                }
+            }
+        }
         if persist_due {
             last_persist = std::time::Instant::now();
         }
@@ -1326,11 +1547,13 @@ async fn poll_loop(app: AppHandle) {
         if fp != last_emit_fp {
             last_emit_fp = fp;
             let _ = app.emit("downloads:updated", &views);
-            // 托盘 tooltip 汇总进行中任务数与总速度（数值变化才调系统 API）
+            // 托盘 tooltip 汇总进行中任务数与总速度：内容变化 + 至少 5s 一次
+            //（tooltip 仅悬停可见，速度每秒都变，逐秒刷新是纯浪费的系统调用）
             let active_count = views.iter().filter(|v| v.status == DownloadTaskView::STATUS_DOWNLOADING).count();
             let total_speed: i64 = views.iter().map(|v| v.speed).sum();
-            if (active_count, total_speed) != last_tray {
+            if (active_count, total_speed) != last_tray && last_tray_at.elapsed() >= std::time::Duration::from_secs(5) {
                 last_tray = (active_count, total_speed);
+                last_tray_at = std::time::Instant::now();
                 crate::tray::update_speed(&app, active_count, total_speed);
             }
         }
@@ -1339,16 +1562,24 @@ async fn poll_loop(app: AppHandle) {
     }
 }
 
-/// 全量任务列表（含已完成/失败；页面切换时拉取）
+/// 任务列表（进行中 + 24h 内终态）：与 downloads:updated 事件窗口同一查询与排序，
+/// 避免初始加载与事件流口径错位（前端 mergeTasks 只增改，超出事件窗口的行会变僵尸）。
 pub fn list_tasks(app: &AppHandle) -> AppResult<Vec<DownloadTaskView>> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let finish_window = now_ms - 24 * 3600 * 1000;
     let mut stmt = conn.prepare(
         "SELECT id, gid, url, file_name, platform, total_size, downloaded_size, status, error_msg, save_path, create_time \
-         FROM download_task ORDER BY create_time DESC LIMIT 500",
+         FROM download_task \
+         WHERE status IN (0, 1, 2) OR (status IN (3, 4) AND finish_time > ?1) \
+         ORDER BY CASE WHEN status IN (0, 1, 2) THEN 0 ELSE 1 END, id DESC LIMIT 200",
     )?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(rusqlite::params![finish_window], |r| {
             Ok(DownloadTaskView {
                 id: r.get(0)?,
                 gid: r.get(1)?,
@@ -1446,7 +1677,7 @@ pub async fn apply_settings(app: &AppHandle, settings: &Settings) -> AppResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, proxy_log_summary};
+    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, proxy_log_summary, sanitize_out_path};
     use crate::error::AppError;
     use crate::models::Settings;
 
@@ -1502,5 +1733,35 @@ mod tests {
             );",
         ).unwrap();
         assert!(matches!(load_detail_row(&conn, 404), Err(AppError::NotFound(_))));
+    }
+
+    #[test]
+    fn sanitize_out_path_blocks_traversal_and_drive_components() {
+        // 路径穿越分量整体剥离，不改变剩余结构
+        assert_eq!(sanitize_out_path("../../evil.exe"), "evil.exe");
+        assert_eq!(sanitize_out_path("a/../../b/c.bin"), "a/b/c.bin");
+        assert_eq!(sanitize_out_path("..\\..\\x.zip"), "x.zip");
+        // 盘符与绝对路径前缀剥掉
+        assert_eq!(sanitize_out_path("C:\\Users\\web\\file.zip"), "Users/web/file.zip");
+        assert_eq!(sanitize_out_path("/etc/passwd"), "etc/passwd");
+        // 反斜杠 / URL 解码后的分隔符一律按分量切
+        assert_eq!(sanitize_out_path("a%2F..%2F..%2Fb"), "a%2F..%2F..%2Fb");
+    }
+
+    #[test]
+    fn sanitize_out_path_handles_windows_reserved_and_edge_cases() {
+        // Windows 保留名加下划线前缀（含带扩展名形式）
+        assert_eq!(sanitize_out_path("CON"), "_CON");
+        assert_eq!(sanitize_out_path("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_out_path("com1.dat"), "_com1.dat");
+        // 尾点尾空格剔除（Windows 会吞掉它们造成歧义）
+        assert_eq!(sanitize_out_path("file."), "file");
+        assert_eq!(sanitize_out_path("name "), "name");
+        // relDir/文件名 子目录结构保留
+        assert_eq!(sanitize_out_path("剧集/S01/E01.mkv"), "剧集/S01/E01.mkv");
+        // 全空 / 纯穿越回退默认名
+        assert_eq!(sanitize_out_path(""), "download.bin");
+        assert_eq!(sanitize_out_path("../.."), "download.bin");
+        assert_eq!(sanitize_out_path("C:\\"), "download.bin");
     }
 }
