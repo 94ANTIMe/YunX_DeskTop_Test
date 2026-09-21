@@ -103,3 +103,11 @@
 - **决策**：引入 `docs/Handed-docs.md` 作为唯一当前记录——🔴 断点区（唯一可原地改写，空闲时显式写「无在途任务」）+ 时间轴（只追加）；写方 / 读方 / 灾难恢复三协议驻留根 `AGENTS.md`（模仿 `Web_SlayTheSpire` 体系适配），并列入硬性约束第 8 条。
 - **备选与取舍**：协议放 `docs/project/handoff.md` 仅由根入口路由（强制力弱一层，会话可能跳过，放弃）；纯靠 git + commit message 传递状态（无在途状态、无验证现场，放弃）。
 - **影响**：workflow.md 前置第 0 步、文档同步增加时间轴收尾；规范修订流程第 3 条为根入口开唯一例外；时间轴（任务执行视角）与 decisions.md 变更记录（规范行为视角）分工明确，不互相复制。
+
+### ADR-0007：后端解耦——平台 trait 化、凭据下沉、aria2 拆分与 models/ipc 分域（2026-09-22）
+
+- **状态**：accepted
+- **背景**：后端 10,699 行中 `aria2.rs` 1810 行混杂 RPC/引擎/任务/策略六种职责并持 6 个全局 static；`resolve.rs` 968 行以三段 `match platform`（147/67/242 行）分发九个平台；`api/` 九个适配文件无统一抽象（quark/uc `refresh_session` 近逐行重复、六套独立轮询、错误码判断各自为政）；`api/baidaccel.rs` 与 `api/pan_files.rs` 反向 import `resolve::load_account_cookie` 形成 api↔resolve 模块环；`models.rs` 416 行单文件承载全部 IPC 契约。新增一个平台需改 6 处且无编译期约束。
+- **决策**：①凭据读取从 resolve 下沉到独立 `credentials` 模块，api 层只依赖它（斩环）；②平台适配收敛为 `PanPlatform` trait（建会话/列文件/取链）+ 注册表分发，resolve.rs 三段 match 逐步删除；③api 公共模式（会话刷新、轮询、错误映射）上提到 `api/mod.rs`；④aria2.rs 拆为 `aria2/{rpc,engine,tasks,policy}` 子模块，全局 static 收敛进引擎结构体或 AppState；⑤models.rs 拆 `models/` 分域文件、ipc.ts 拆域模块，均以 re-export/聚合导出保持既有路径不变。全过程行为零变化、IPC 字段与 DB 结构不动。
+- **备选与取舍**：完整 services/ 目录分层（放弃——commands 已薄，业务层按域拆文件即可达到同等边界，少一层抽象税）；维持现状只拆文件不引 trait（放弃——新增平台漏改 6 处的根因是无编译期约束）；一步到位大爆炸式重排（放弃——每步须测试绿独立 commit，可随时停）。
+- **影响**：落点 `src-tauri/src/{credentials.rs,resolve.rs,aria2/,models/,api/}` 与 `src/lib/ipc/`；architecture.md 分层规则随 C2/C4/C5/C6 各步落地后增量修订；cli.rs、subscription.rs 等第三方调用方随 C4 收敛；对旧数据与 IPC 无兼容影响。

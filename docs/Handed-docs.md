@@ -17,10 +17,14 @@
 
 ## 🔴 当前断点区
 
-**状态：空闲——当前无在途任务。**
+**状态：进行中——C 线解耦模块化（三线总任务第三线；A、B 线已完成见时间轴）。**
 
-- 三线总任务（A 夸克缺陷收尾 → B 前端界面整体升级 → C 解耦模块化）中 **A、B 两线已完成**，条目见下方时间轴；A 线夸克修复已打包安装 D:\YunX，**真机复测尚未执行**（测试链接 `https://pan.quark.cn/s/e85fbf6f6ec0`）——这是 A 线唯一悬置项。
-- 下一步为 **C 线解耦模块化**（C1 文档先行 → C2 斩环 → C3 api 公共层 → C4 平台 trait 化 → C5 aria2 拆分 → C6 models/ipc 分域 → C7 前端收尾；每步独立 commit、测试绿再进下一步）。开工时按写方协议在本区建新断点块。
+- 目标：后端结构解耦、行为零变化。顺序与验收：C1 ADR-0007（结构决策入档）→ C2 斩断 api↔resolve 循环依赖（`load_account_cookie` 下沉 `credentials.rs`，`cargo check` 证依赖方向）→ C3 api 公共层（quark/uc refresh_session 合并、公共轮询 helper、错误映射归一）→ C4 `PanPlatform` trait + resolve.rs 三段 match 改注册表（逐平台迁移，quark 先行，每迁一个全量测试）→ C5 aria2.rs 拆 `aria2/` 子模块（rpc/engine/tasks/policy，statics 收敛）→ C6 models.rs 拆 models/ 分域 + ipc.ts 分域（re-export 保路径）→ C7 前端收尾（STATUS_TEXT/平台注册表单一来源、ResolvePage 区块拆分）。
+- 验收：每步 `cargo test`（27）+ `pnpm test`（56）+ `cargo check` 全绿、独立 commit、断点刷新；全程行为零变化（IPC 字段、DB 结构、UI 行为不变）。
+- 基线 commit：`6431a18`（B 线完成点）。
+- 已完成：C1 ADR-0007 入档（决策与取舍，规范性 architecture.md 修订随各步落地——按「新规范先落地再写进规范」规则拆分执行）。
+- 当前计划：C2 斩环（credentials.rs 下沉）→ C3 → C4 → C5 → C6 → C7。
+- 不改：行为与语义（纯结构重构）、IPC 契约、DB 结构、版本号；不 push。
 - 若用户真机复测打回夸克修复：插一个小型 Rust 修复批次（单独 commit），再继续 C 线。
 - 提交均为本地 commit（`e7ca036`…`30eaaf5` 及文档提交），**未 push**；不升版本号。
 
