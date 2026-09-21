@@ -28,7 +28,7 @@
 - 当前计划：A3（引擎自愈后重挂任务 + poll 失联分支不冻结）→ A5（并发设置暴露 + 热更）→ A6（poll_task 错误退出 + 登录文案）→ A 线回归 → 打包装机。
 - 已完成（A 线里程碑 2：自愈重挂与小修，A3+A6；A5 核实为零改动）：① A3——poll_loop 批量查态后检测「活跃 gid 全部失联」→ 后台触发 `remount_if_detached`（复用启动恢复 `resume_pending_tasks` + 10s 冷却 + 引擎健康复检），不在 respawn_engine 原地重挂（会与 rpc_call 重试 addUri 撞车双入队）；取链刷新抽成 `refreshed_target` 助手，恢复/重挂两路共用（成功回写 DB）；② A6——`quark::poll_task` 连续 3 次非 200 带错误码+消息失败（`poll_non_ok_failure` 纯函数 + 测试），不再静默吞满 60s；夸克「请先登录」文案统一为 `QUARK_LOGIN_HINT`（覆盖刚登录未落库的竞态窗口，resolve.rs 4 处）；③ A5——核实 `maxConcurrentDownloads` 前端接口/默认值/设置页滑杆/`apply_settings` 热更**均已存在**，此前调研按 snake_case 误报为缺失，零改动。
 - A 线回归（2026-09-22）：`cargo test` 27/27、`pnpm test` 36/36、`pnpm build` 成功、`cargo check` 通过。**真机夸克复测：未验证（待用户）**。
-- 当前计划：本地打包（跳更新器签名）→ NSIS 静默安装 D:\YunX → 时间戳校验 → 交用户复测（测试链接 `https://pan.quark.cn/s/e85fbf6f6ec0`）。随后 B 线：开工第一步先把用户会话中的 UI 升级方案原文落盘到 docs/（防会话丢失），再按 B1→B4 执行；最后 C 线 C1→C7。
+- 当前计划：本地打包（跳更新器签名）→ NSIS 静默安装 D:\YunX → 时间戳校验 → 交用户复测（测试链接 `https://pan.quark.cn/s/e85fbf6f6ec0`）。随后 B 线：开工第一步已把用户提供的 UI 升级方案原文落盘为 [docs/project/ui-upgrade-plan.md](project/ui-upgrade-plan.md)（B0 完成），按 B1→B4 执行；最后 C 线 C1→C7。
 - B 线方案要点（执行以用户原文为准）：B1 全局感知层（useDownloads 单例 store、TopCapsule 下载角标、全局 Toast、四页 notice 迁移）；B2 基础组件层 `src/components/ui/`（Button/IconButton/Toggle/Select/Skeleton/SliderRow/EmptyState + Modal/Drawer/ConfirmDialog 统一，逐页迁移 + 7 主题抽查）；B3 交互升级（解析多选批量下载、破坏性确认×8、Ctrl+1~7 / Ctrl+V 快捷键、DrivePage 下拉关闭、StatsPage 键盘可达、Onboarding 三步修复、骨架屏×4、LogsPage memo）；B4 清债（SettingsPage 控件收编、grep 残留清零、文档同步）。硬边界：零新依赖、零 Rust/IPC 触点、不升版本、不 push、颜色只走 token、交互四件套。已确认砍掉：日志页虚拟化。
 - 不改：夸克 API 字段识别、发布配置；三线全程不升版本号、不 push。
 
