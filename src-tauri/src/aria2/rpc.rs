@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::error::{AppError, AppResult};
 
 // 父模块的引擎诊断日志与自愈重拉（rpc_call 的 Unauthorized / 连接失败恢复路径）
-use super::{engine_log, respawn_engine};
+use super::engine::{engine_log, respawn_engine};
 
 pub(crate) const RPC_PORT: u16 = 16800;
 
