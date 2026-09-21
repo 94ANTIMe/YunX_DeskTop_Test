@@ -17,6 +17,26 @@
 
 ## 🔴 当前断点区
 
+**状态：空闲——当前无在途任务。**
+
+- 三线总任务（A 夸克缺陷收尾 → B 前端界面整体升级 → C 解耦模块化）中 **A、B 两线已完成**，条目见下方时间轴；A 线夸克修复已打包安装 D:\YunX，**真机复测尚未执行**（测试链接 `https://pan.quark.cn/s/e85fbf6f6ec0`）——这是 A 线唯一悬置项。
+- 下一步为 **C 线解耦模块化**（C1 文档先行 → C2 斩环 → C3 api 公共层 → C4 平台 trait 化 → C5 aria2 拆分 → C6 models/ipc 分域 → C7 前端收尾；每步独立 commit、测试绿再进下一步）。开工时按写方协议在本区建新断点块。
+- 若用户真机复测打回夸克修复：插一个小型 Rust 修复批次（单独 commit），再继续 C 线。
+- 提交均为本地 commit（`e7ca036`…`30eaaf5` 及文档提交），**未 push**；不升版本号。
+
+## 时间轴条目模板
+
+```markdown
+- **YYYY-MM-DD · 任务标题**
+  - 做了什么：一段话，讲「实际发生了什么变化」。
+  - 触点：改动的关键文件 / 设置项 / IPC 字段。
+  - 验证：按「自动测试 / 人工冒烟 / 未验证」三档，附命令与结果；不适用也要写明为什么不适用。
+  - 给产品的一句话：这次变更对使用者意味着什么。
+  - 遗留：未做完 / 已知限制 / 后续方向；没有就写「无」。
+```
+
+## 🔴 当前断点区
+
 **状态：进行中——三线总任务：A 夸克缺陷收尾 → B 前端界面整体升级 → C 解耦模块化（当前在 A 线）。**
 
 - 目标：A 线补齐夸克下载卡死（「等待队列 / 下载中 0 速度」）的遗留缺口并打包真机复测；B 线按用户提供的 UI 升级方案执行（纯前端，零 IPC/Rust 触点）；C 线解耦重构（平台 trait、aria2 拆分、models/ipc 分域）。三线串行，每阶段 = 实现 + 验证 + 刷新断点 + 独立 commit。
@@ -42,6 +62,20 @@
 ## 时间轴
 
 （最新在上，只追加）
+
+- **2026-09-22 · B 线：前端界面整体升级（全局感知层 / 基础组件层 / 交互升级 / 清债）**
+  - 做了什么：按用户提供的 ui-upgrade-plan.md 执行四阶段。B1 全局感知层：`useDownloads` 下载任务单例 store（事件合并/速度采样/终态迁移自动 toast/派生统计，隐藏页零重渲染保持）、全局 Toast（`lib/toast.ts` + ToastHost，aria-live）、顶栏下载角标+速度、四页反馈迁移 toast；B2 基础组件层：`components/ui/` 九个原语（Button/IconButton/Toggle/Select/Skeleton/SliderRow/Modal/Drawer/ConfirmDialog）+13 例单测，全部弹层（任务详情/批量队列/搜同款/订阅/收藏/历史/确认）迁入统一壳层，删旧 ConfirmDialog；B3 交互升级：解析多选批量下载、破坏性确认×8、Ctrl+1~7/Ctrl+V 快捷键、DrivePage 下拉 click-outside+Esc、StatsPage 柱状图键盘可达、Onboarding 三步修复、骨架屏×4、LogsPage 行 memo；B4 清债：SettingsPage 5 滑杆/3 下拉/2 开关收编 ui 原语，全库手写 select/range/switch/遮罩清零（LoginDialog 为登记例外），新约定写入 ui-and-themes.md，变更记录入 decisions.md。
+  - 触点：新增 `lib/toast.ts`、`hooks/useDownloads.ts`、`components/ui/*`、`docs/project/ui-upgrade-plan.md`；改 App/TopCapsule/ToastHost/七页/TaskDetailDrawer/BatchQueuePanel/CrossDriveSearchModal/EmptyState/decisions/ui-and-themes/Handed-docs。IPC 与 Rust 零变化（cargo check 证明）。
+  - 验证：自动测试——`pnpm test` 56/56（存量 36 语义保持 + toast 4 + store 4 + ui 原语 13 中计入 Modal 4 与 primitives 9，总数对齐）、`pnpm build` 通过、`cargo check` 通过（证零 Rust 触点）。人工冒烟——未验证：7 主题×明暗视觉走查、键盘走查（无鼠标解析→批量下载→切页）、真机批量下载与 toast 观感、Onboarding 新流程，需真机执行。
+  - 给产品的一句话：界面没有多出一个新功能，但下载进度随时挂在顶栏、操作反馈不再挤动页面、每个危险操作都有回头路、所有按钮弹窗长得一样——软件从「能用」变「稳」。
+  - 遗留：真机主题/键盘走查待做；LoginDialog 壳未迁（WebView 登录，登记例外）；SettingsPage 深拆按边界不做。
+
+- **2026-09-22 · A 线：夸克下载卡死修复（六项 + 打包装机）**
+  - 做了什么：修「等待下载队列 / 下载中 0 速度」三类根因——①夸克任务 `lowest-speed-limit` 低速僵死中止（http_task_options/stall_guard_options 纯函数锁定）；②恢复重取链：download_task 加 `fetch_ctx_json` 列，夸克三条取链路线写上下文，恢复/重试/重挂前刷新 `__puus` 重取直链（失败回退旧链）；③引擎失联自动重挂（poll 检测 gid 全失联 → 复用 resume_pending_tasks，10s 冷却）；④resume 查 aria2 真实状态落库（不再假「下载中」）；⑤`max_concurrent_downloads` 设置项核实为已实现（此前调研误报）；⑥转存轮询连续失败快速报错 + 登录文案区分竞态。完成后本地打包（跳更新器签名）静默安装 D:\YunX 并校验时间戳（Sep 22 02:04）。
+  - 触点：`aria2.rs`、`resolve.rs`、`api/quark.rs`、`api/pan_files.rs`、`models.rs`（DownloadLink.fetchCtx）、`db/schema.rs`+`db/mod.rs`（fetch_ctx_json 列迁移）、`commands/download.rs`、`subscription.rs`、`ipc.ts`（fetchCtx 成对）、`lib/download.ts`、`ResolvePage.tsx`、`PanFileManager.tsx`。
+  - 验证：自动测试——`cargo test` 27/27（新增锁定 5 例）、`cargo check`、`pnpm test`、`pnpm build` 全过。人工冒烟——**未验证：真机夸克下载复测待用户执行**（装机已完成，D:\YunX\yunx-desktop.exe 时间戳已确认为本批构建）。
+  - 给产品的一句话：夸克下载不再「排队卡死、假下载」，僵死任务会自动报错可重试，重开应用/网络恢复后任务自己活过来。
+  - 遗留：真机复测结论未知；若打回按断点区预案插小型修复批次。坑位：git-bash 调 NSIS 需 `MSYS2_ARG_CONV_EXCL="*"`。
 
 - **2026-09-21 · 独立 CLI 与 function-call 工具入口**
   - 做了什么：新增独立 Rust CLI `yunx` 与本地 JSON 工具调用入口，支持解析、列文件、流式下载、脱敏日志查询；提供 `tools` 输出 OpenAI-compatible function definition，`tool` 统一返回 JSON；补充 `pnpm cli`、README、架构说明与 ADR-0006。CLI 每次命令内建立解析会话，不落盘平台令牌，桌面端原有 aria2 流程不变。

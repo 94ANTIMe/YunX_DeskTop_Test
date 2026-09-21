@@ -47,6 +47,7 @@ export default function SliderRow({
           value={value}
           onChange={(e) => onInput(Number(e.currentTarget.value))}
           onMouseUp={(e) => commit(e.currentTarget.value)}
+          onTouchEnd={(e) => commit(e.currentTarget.value)}
           onBlur={(e) => commit(e.currentTarget.value)}
           className="w-44 accent-clay disabled:cursor-not-allowed disabled:opacity-40"
           aria-label={label}

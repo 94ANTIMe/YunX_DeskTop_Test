@@ -6,6 +6,8 @@ import { errMsg, ipc, DEFAULT_SETTINGS, type SearchItem, type Settings, type Sub
 import { toast } from "../lib/toast";
 import Modal from "../components/ui/Modal";
 import Button from "../components/ui/Button";
+import Toggle from "../components/ui/Toggle";
+import Select from "../components/ui/Select";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { platformLabel } from "../lib/format";
 import searchHero from "../assets/art/search-hero.jpg";
@@ -254,21 +256,12 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
               ) : (
                 subs.map((sub) => (
                   <li key={sub.id} className="flex items-center gap-3 py-3">
-                    <button
-                      role="switch"
-                      aria-checked={sub.enabled}
-                      onClick={() => toggleSub(sub)}
-                      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                        sub.enabled ? "bg-clay" : "bg-ink/15"
-                      }`}
-                      title={sub.enabled ? "点击暂停订阅" : "点击启用订阅"}
-                    >
-                      <span
-                        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
-                          sub.enabled ? "left-[18px]" : "left-0.5"
-                        }`}
-                      />
-                    </button>
+                    <Toggle
+                      size="sm"
+                      checked={sub.enabled}
+                      onChange={() => toggleSub(sub)}
+                      aria-label={sub.enabled ? `暂停订阅 ${sub.keyword}` : `启用订阅 ${sub.keyword}`}
+                    />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm text-ink">{sub.keyword}</p>
                       <p className="truncate text-[11px] text-ink-soft/70" title={sub.lastResult}>
@@ -426,17 +419,13 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
               </div>
               <div>
                 <label className="text-xs text-ink-soft">优先平台</label>
-                <select
+                <Select
                   value={subForm.platform}
-                  onChange={(e) => setSubForm({ ...subForm, platform: e.currentTarget.value })}
-                  className="mt-1 h-10 w-full rounded-ctrl border border-ink/10 bg-carrier-deep px-3 text-sm text-ink focus:border-clay focus:outline-none"
-                >
-                  {SUB_PLATFORM_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                  options={SUB_PLATFORM_OPTIONS.map((opt) => ({ value: String(opt.value), label: opt.label }))}
+                  onChange={(v) => setSubForm({ ...subForm, platform: v })}
+                  aria-label="优先平台"
+                  className="mt-1 h-10 w-full text-sm"
+                />
               </div>
               <div>
                 <label className="text-xs text-ink-soft">文件名过滤正则（可选）</label>

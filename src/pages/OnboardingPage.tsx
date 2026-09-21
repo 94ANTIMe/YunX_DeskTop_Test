@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { errMsg, ipc, type Settings } from "../lib/ipc";
+import Toggle from "../components/ui/Toggle";
 import aboutHero from "../assets/art/about-lighthouse.jpg";
 
 /** 公共实例预设（PanSou 官方在线体验站，实测可用；可能不稳定 / 政策收紧后失效） */
@@ -182,20 +183,7 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
                   <p className="text-sm text-ink-soft">在导航栏显示「搜索」页</p>
                   <p className="mt-0.5 text-xs text-ink-soft/70">关闭则隐藏搜索入口（服务地址保留）</p>
                 </div>
-                <button
-                  role="switch"
-                  aria-checked={showSearch}
-                  onClick={() => setShowSearch(!showSearch)}
-                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-                    showSearch ? "bg-clay" : "bg-ink/15"
-                  }`}
-                >
-                  <span
-                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-                      showSearch ? "left-[22px]" : "left-0.5"
-                    }`}
-                  />
-                </button>
+                <Toggle checked={showSearch} onChange={setShowSearch} aria-label="在导航栏显示搜索页" />
               </label>
             </div>
 

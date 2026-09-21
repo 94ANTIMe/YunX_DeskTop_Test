@@ -58,3 +58,12 @@
 - [ ] 错误提示、成功提示、警告（黄 / 绿 / 青主题重点验证文字可读性）
 - [ ] 弹窗 / 抽屉 / 导航胶囊 / 滚动条
 - [ ] 键盘走查：Tab 顺序、方向键选主题、折叠面板展开 / 收起
+
+## 弹层、Toast 与 z 层级（2026-09-22 B 线新增约定）
+
+- **弹层一律用 `src/components/ui/`**：居中弹窗用 `ui/Modal`（z-[70]、遮罩 `bg-black/40 backdrop-blur animate-fade`、面板 `animate-rise rounded-card bg-carrier shadow-capsule`、初始焦点 + 关闭还焦 + body 滚动锁、Esc/点遮罩可配）；右侧抽屉用 `ui/Drawer`（同 z-[70]，内置 220ms leaving 机制）；确认类用 `ui/ConfirmDialog`（danger 时 alertdialog 语义）。禁止再手写 `fixed inset-0` 遮罩（LoginDialog 为 WebView 登录壳遗留例外）。
+- **z 层级**：内容 < 导航 z-10 < 弹层 z-[70] < 全局 Toast z-[80]。新层级出现时先查本表。
+- **即时反馈用 `lib/toast.ts` + `ToastHost`**（success/error/info；队列上限 4、自动消失 error 7s 其余 4s、同类去重；`aria-live="polite"` 在 ToastHost 内）。页面不再自建 notice 计时器横幅；表单引导类错误（需持续可见的上下文提示）可保留内联。
+- **控件原语**：按钮 `ui/Button`（primary/outline/danger/soft × sm/md/lg；实底禁用 opacity-50、描边 40；hover 挂 enabled:）、开关 `ui/Toggle`（role=switch）、下拉 `ui/Select`（原生封装）、设置行滑杆 `ui/SliderRow`（拖动即时 onInput、松手/失焦/触屏结束 onCommit）、载入占位 `ui/Skeleton`（aria-hidden + motion-reduce 降级）、空态 `EmptyState`（image 或 icon 变体）。新增同类控件先扩展原语，不再手写类名。
+- **破坏性操作（删除/清空/登出/取消任务）必须过 `ui/ConfirmDialog`**，文案说清后果与是否可逆。
+- **全局快捷键**：Ctrl+1~7 按可见 Tab 顺序切页、Ctrl+V 粘贴分享链接直达解析；新快捷键须在此登记并避开输入焦点。

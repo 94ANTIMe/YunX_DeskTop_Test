@@ -5,6 +5,9 @@ import { Bell, Check, ChevronDown, ClipboardPaste, Download, ExternalLink, Folde
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, onSettingsUpdated, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
 import { toast } from "../lib/toast";
+import Toggle from "../components/ui/Toggle";
+import Select from "../components/ui/Select";
+import SliderRow from "../components/ui/SliderRow";
 import { useUpdate } from "../hooks/useUpdate";
 import { formatBytes } from "../lib/format";
 import type { ThemeMode } from "../hooks/useTheme";
@@ -38,20 +41,7 @@ function ToggleRow({
           <p className="mt-0.5 text-xs text-ink-soft/70">{desc}</p>
         </div>
       </div>
-      <button
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-          checked ? "bg-clay" : "bg-ink/15"
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-            checked ? "left-[22px]" : "left-0.5"
-          }`}
-        />
-      </button>
+      <Toggle checked={checked} onChange={onChange} />
     </div>
   );
 }
@@ -474,48 +464,23 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
 
           <dl className="mt-4 divide-y divide-ink/10">
             {/* 分片并发 */}
-            <div className="flex items-center justify-between py-3">
-              <dt className="text-sm text-ink-soft">分片并发数（split）</dt>
-              <dd className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={1}
-                  max={64}
-                  step={1}
-                  value={s.downloadThreads}
-                  onChange={(e) => setSettings({ ...s, downloadThreads: Number(e.currentTarget.value) })}
-                  onMouseUp={(e) => persist({ ...s, downloadThreads: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onTouchEnd={(e) => persist({ ...s, downloadThreads: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onBlur={(e) => {
-                    const v = Number(e.currentTarget.value);
-                    if (v !== s.downloadThreads) persist({ ...s, downloadThreads: v });
-                  }}
-                  className="w-44 accent-clay"
-                />
-                <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadThreads}</span>
-              </dd>
-            </div>
+            <SliderRow
+              label="分片并发数（split）"
+              min={1}
+              max={64}
+              value={s.downloadThreads}
+              onInput={(v) => setSettings({ ...s, downloadThreads: v })}
+              onCommit={(v) => persist({ ...s, downloadThreads: v })}
+            />
             {/* 并发任务 */}
-            <div className="flex items-center justify-between py-3">
-              <dt className="text-sm text-ink-soft">同时下载任务数</dt>
-              <dd className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={1}
-                  max={10}
-                  step={1}
-                  value={s.maxConcurrentDownloads}
-                  onChange={(e) => setSettings({ ...s, maxConcurrentDownloads: Number(e.currentTarget.value) })}
-                  onMouseUp={(e) => persist({ ...s, maxConcurrentDownloads: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onBlur={(e) => {
-                    const v = Number(e.currentTarget.value);
-                    if (v !== s.maxConcurrentDownloads) persist({ ...s, maxConcurrentDownloads: v });
-                  }}
-                  className="w-44 accent-clay"
-                />
-                <span className="w-8 text-right font-mono text-sm text-ink">{s.maxConcurrentDownloads}</span>
-              </dd>
-            </div>
+            <SliderRow
+              label="同时下载任务数"
+              min={1}
+              max={10}
+              value={s.maxConcurrentDownloads}
+              onInput={(v) => setSettings({ ...s, maxConcurrentDownloads: v })}
+              onCommit={(v) => persist({ ...s, maxConcurrentDownloads: v })}
+            />
             {/* 全局限速 */}
             <div className="flex items-center justify-between py-3">
               <dt className="text-sm text-ink-soft">全局限速</dt>
@@ -536,74 +501,35 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
               </dd>
             </div>
             {/* 失败重试 */}
-            <div className="flex items-center justify-between py-3">
-              <dt className="text-sm text-ink-soft">失败重试次数</dt>
-              <dd className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={0}
-                  max={10}
-                  step={1}
-                  value={s.downloadRetryCount}
-                  onChange={(e) => setSettings({ ...s, downloadRetryCount: Number(e.currentTarget.value) })}
-                  onMouseUp={(e) => persist({ ...s, downloadRetryCount: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onBlur={(e) => {
-                    const v = Number(e.currentTarget.value);
-                    if (v !== s.downloadRetryCount) persist({ ...s, downloadRetryCount: v });
-                  }}
-                  className="w-44 accent-clay"
-                />
-                <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadRetryCount}</span>
-              </dd>
-            </div>
+            <SliderRow
+              label="失败重试次数"
+              min={0}
+              max={10}
+              value={s.downloadRetryCount}
+              onInput={(v) => setSettings({ ...s, downloadRetryCount: v })}
+              onCommit={(v) => persist({ ...s, downloadRetryCount: v })}
+            />
             {/* 分片最小体积（高级） */}
-            <div className="flex items-center justify-between py-3">
-              <dt className="text-sm text-ink-soft">
-                分片最小体积
-                <span className="ml-1 font-mono text-[10px] text-ink-soft/60">min-split-size</span>
-              </dt>
-              <dd className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={1}
-                  max={64}
-                  step={1}
-                  value={s.downloadMinSplitMb}
-                  onChange={(e) => setSettings({ ...s, downloadMinSplitMb: Number(e.currentTarget.value) })}
-                  onMouseUp={(e) => persist({ ...s, downloadMinSplitMb: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onBlur={(e) => {
-                    const v = Number(e.currentTarget.value);
-                    if (v !== s.downloadMinSplitMb) persist({ ...s, downloadMinSplitMb: v });
-                  }}
-                  className="w-44 accent-clay"
-                />
-                <span className="w-12 text-right font-mono text-sm text-ink">{s.downloadMinSplitMb} MB</span>
-              </dd>
-            </div>
+            <SliderRow
+              label="分片最小体积"
+              codeLabel="min-split-size"
+              min={1}
+              max={64}
+              unit=" MB"
+              value={s.downloadMinSplitMb}
+              onInput={(v) => setSettings({ ...s, downloadMinSplitMb: v })}
+              onCommit={(v) => persist({ ...s, downloadMinSplitMb: v })}
+            />
             {/* 单服务器连接数（高级） */}
-            <div className="flex items-center justify-between py-3">
-              <dt className="text-sm text-ink-soft">
-                单服务器最大连接数
-                <span className="ml-1 font-mono text-[10px] text-ink-soft/60">max-connection-per-server</span>
-              </dt>
-              <dd className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min={1}
-                  max={16}
-                  step={1}
-                  value={s.downloadConnPerServer}
-                  onChange={(e) => setSettings({ ...s, downloadConnPerServer: Number(e.currentTarget.value) })}
-                  onMouseUp={(e) => persist({ ...s, downloadConnPerServer: Number((e.currentTarget as HTMLInputElement).value) })}
-                  onBlur={(e) => {
-                    const v = Number(e.currentTarget.value);
-                    if (v !== s.downloadConnPerServer) persist({ ...s, downloadConnPerServer: v });
-                  }}
-                  className="w-44 accent-clay"
-                />
-                <span className="w-8 text-right font-mono text-sm text-ink">{s.downloadConnPerServer}</span>
-              </dd>
-            </div>
+            <SliderRow
+              label="单服务器最大连接数"
+              codeLabel="max-connection-per-server"
+              min={1}
+              max={16}
+              value={s.downloadConnPerServer}
+              onInput={(v) => setSettings({ ...s, downloadConnPerServer: v })}
+              onCommit={(v) => persist({ ...s, downloadConnPerServer: v })}
+            />
             <div className="py-3">
               <dt className="text-xs text-ink-soft/70">
                 分片体积越小越容易吃满多连接带宽（小文件无所谓）；连接数受网盘风控限制，过高可能被限速。对新任务即时生效。
@@ -635,17 +561,13 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                   <p className="mt-0.5 text-xs text-ink-soft/70">关机保留 60 秒取消窗口（命令行执行 shutdown /a）</p>
                 </div>
               </div>
-              <select
+              <Select
                 value={s.afterDownloadAction}
-                onChange={(e) => persist({ ...s, afterDownloadAction: e.currentTarget.value })}
-                className="h-9 shrink-0 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 text-xs text-ink focus:border-clay focus:outline-none"
-              >
-                {AFTER_ACTION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                options={AFTER_ACTION_OPTIONS}
+                onChange={(v) => persist({ ...s, afterDownloadAction: v })}
+                aria-label="全部下载完成后"
+                className="shrink-0"
+              />
             </div>
           </div>
         </section>
@@ -675,14 +597,15 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
               <div className="space-y-3 pt-3">
                 {/* 类型 + 地址 + 端口 */}
                 <div className="flex items-center gap-2">
-                  <select
+                  <Select
                     value={s.proxyType}
-                    onChange={(e) => persist({ ...s, proxyType: e.currentTarget.value })}
-                    className="h-9 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 font-mono text-xs text-ink focus:border-clay focus:outline-none"
-                  >
-                    <option value="http">HTTP</option>
-                    <option value="socks5">SOCKS5</option>
-                  </select>
+                    options={[
+                      { value: "http", label: "HTTP" },
+                      { value: "socks5", label: "SOCKS5" },
+                    ]}
+                    onChange={(v) => persist({ ...s, proxyType: v })}
+                    aria-label="代理类型"
+                  />
                   <input
                     type="text"
                     defaultValue={s.proxyHost}
@@ -843,17 +766,13 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                     <p className="mt-0.5 text-xs text-ink-soft/70">新建订阅将在下个周期开始自动检查</p>
                   </div>
                 </div>
-                <select
-                  value={s.subscriptionIntervalMinutes}
-                  onChange={(e) => persist({ ...s, subscriptionIntervalMinutes: Number(e.currentTarget.value) })}
-                  className="h-9 shrink-0 rounded-ctrl border border-ink/10 bg-carrier-deep px-2 text-xs text-ink focus:border-clay focus:outline-none"
-                >
-                  {SUB_INTERVAL_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={String(s.subscriptionIntervalMinutes)}
+                  options={SUB_INTERVAL_OPTIONS.map((opt) => ({ value: String(opt.value), label: opt.label }))}
+                  onChange={(v) => persist({ ...s, subscriptionIntervalMinutes: Number(v) })}
+                  aria-label="订阅检查间隔"
+                  className="shrink-0"
+                />
               </div>
             )}
           </div>
@@ -876,20 +795,10 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
               <p className="text-sm text-ink-soft">启动时自动检查更新</p>
               <p className="mt-0.5 text-xs text-ink-soft/70">关闭后仅可在本页手动点「检查更新」</p>
             </div>
-            <button
-              role="switch"
-              aria-checked={s.autoCheckUpdate}
-              onClick={() => persist({ ...s, autoCheckUpdate: !s.autoCheckUpdate })}
-              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-                s.autoCheckUpdate ? "bg-clay" : "bg-ink/15"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
-                  s.autoCheckUpdate ? "left-[22px]" : "left-0.5"
-                }`}
-              />
-            </button>
+            <Toggle
+              checked={s.autoCheckUpdate}
+              onChange={(v) => persist({ ...s, autoCheckUpdate: v })}
+            />
           </div>
 
           {/* 版本与检查 */}
