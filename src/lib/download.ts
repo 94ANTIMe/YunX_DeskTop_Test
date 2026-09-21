@@ -16,6 +16,7 @@ export async function fetchAndEnqueue(
     link.platform,
     link.cleanupId || undefined,
     link.mirrors || undefined,
+    link.fetchCtx || undefined,
   );
   return outName;
 }

@@ -31,6 +31,11 @@ pub fn init(data_dir: &Path) -> AppResult<Connection> {
         "ALTER TABLE download_task ADD COLUMN mirrors_json TEXT NOT NULL DEFAULT '[]'",
         [],
     );
+    // 夸克等平台恢复/重试时的重新取链上下文（JSON：{"fid":...}；旧任务为空 = 回退旧直链）
+    let _ = conn.execute(
+        "ALTER TABLE download_task ADD COLUMN fetch_ctx_json TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     // 轮询窗口查询索引：poll_loop 每秒按 (status, finish_time) 过滤，
     // download_task 无索引时该查询是每秒一次的全表扫描（已配 7 天终态自动清理防膨胀）
     let _ = conn.execute(
@@ -80,6 +85,13 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             ).unwrap();
             assert_eq!(row, ("keep.bin".into(), "[]".into()));
+            // 旧库补列：fetch_ctx_json 默认空串 = 恢复时回退旧直链
+            let ctx: String = migrated.query_row(
+                "SELECT fetch_ctx_json FROM download_task WHERE id = 1",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(ctx, "");
         }
         let _ = std::fs::remove_dir_all(dir);
     }

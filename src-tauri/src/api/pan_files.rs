@@ -179,6 +179,7 @@ pub async fn get_personal_download_link(
                 platform: "baidu".into(),
                 cleanup_id: String::new(),
                 mirrors,
+                fetch_ctx: String::new(),
             })
         }
         Platform::Quark => {
@@ -196,6 +197,7 @@ pub async fn get_personal_download_link(
                 platform: "quark".into(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: crate::resolve::quark_fetch_ctx(&file.fid),
             })
         }
         Platform::Pan123 => {
@@ -229,6 +231,7 @@ pub async fn get_personal_download_link(
                 platform: "pan123".into(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         _ => Err(AppError::Api("暂不支持该网盘的文件直链下载".into())),

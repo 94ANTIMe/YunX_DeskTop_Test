@@ -4,7 +4,7 @@ use crate::aria2;
 use crate::error::AppResult;
 use crate::models::{DownloadDetail, DownloadTaskView};
 
-/// 入队下载任务（直链 + 多源镜像 + 请求头 → aria2）
+/// 入队下载任务（直链 + 多源镜像 + 请求头 → aria2；fetch_ctx 为夸克恢复重取链上下文）
 #[tauri::command]
 pub async fn enqueue_download(
     app: AppHandle,
@@ -14,6 +14,7 @@ pub async fn enqueue_download(
     platform: String,
     cleanup_id: Option<String>,
     mirrors: Option<Vec<String>>,
+    fetch_ctx: Option<String>,
 ) -> AppResult<i64> {
     aria2::enqueue(
         &app,
@@ -24,6 +25,7 @@ pub async fn enqueue_download(
         cleanup_id.as_deref().unwrap_or(""),
         false,
         mirrors.unwrap_or_default(),
+        fetch_ctx.as_deref().unwrap_or(""),
     )
     .await
 }

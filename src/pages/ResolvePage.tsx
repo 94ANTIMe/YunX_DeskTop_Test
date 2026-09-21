@@ -369,6 +369,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
         link.platform,
         link.cleanupId || undefined,
         link.mirrors || undefined,
+        link.fetchCtx || undefined,
       );
       showNotice(`已加入下载：${link.filename || file.fname}`);
       onNavigate("download");
@@ -407,6 +408,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             link.platform,
             link.cleanupId || undefined,
             link.mirrors || undefined,
+            link.fetchCtx || undefined,
           );
           done++;
         } catch {

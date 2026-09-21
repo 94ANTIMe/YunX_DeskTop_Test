@@ -159,14 +159,14 @@ fn persist_cookie(state: &AppState, platform: Platform, cookie: &str, nickname: 
 
 /// 夸克转存取链路线（他人分享）：
 /// 临时目录 → 唯一子目录 tr_*（去重键每次不同，根治二次转存 404 code:21001）
-/// → 转存 → 轮询 → 取链；返回 (url, size, 子目录 fid, 下载 Cookie)（下载完成后删整个子目录）。
-/// 自己的分享会因服务端拒绝转存抛错，由调用方走直取路线。
+/// → 转存 → 轮询 → 取链；返回 (url, size, 子目录 fid, 下载 Cookie, 转存文件 fid)
+/// （下载完成后删整个子目录）。自己的分享会因服务端拒绝转存抛错，由调用方走直取路线。
 async fn quark_transfer_route(
     state: &AppState,
     session: &ResolveSession,
     cookie: &str,
     file: &ShareFile,
-) -> AppResult<(String, i64, String, String)> {
+) -> AppResult<(String, i64, String, String, String)> {
     let base_dir = quark::ensure_temp_dir(&state.http, cookie).await?;
     let sub_dir = quark::create_transfer_subdir(&state.http, &base_dir, cookie).await?;
     let task_id = quark::save_share_file(
@@ -175,7 +175,45 @@ async fn quark_transfer_route(
     .await?;
     let new_fid = quark::poll_task(&state.http, &task_id, cookie).await?;
     let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &new_fid, cookie).await?;
-    Ok((url, size, sub_dir, download_cookie))
+    Ok((url, size, sub_dir, download_cookie, new_fid))
+}
+
+/// 夸克取链上下文：转存路线存新转存文件 fid，直取/个人文件路线存原 fid。
+/// 恢复 / 失败重试时按它重新取链（直链与 __puus 都有时效）。
+pub(crate) fn quark_fetch_ctx(fid: &str) -> String {
+    serde_json::json!({ "fid": fid }).to_string()
+}
+
+/// 解析取链上下文中的文件 fid（纯函数，测试锁定）
+fn parse_fetch_fid(ctx: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(ctx).ok()?;
+    v.get("fid")?.as_str().map(str::to_string).filter(|s| !s.is_empty())
+}
+
+/// 恢复 / 失败重试下载前按上下文重新取链：刷新 Cookie（__puus 轮换）后重跑取链接口，
+/// 返回 (新直链, 请求头)。失败由调用方决定回退策略（旧直链可能仍可用）。
+pub(crate) async fn refresh_quark_download_link(
+    state: &AppState,
+    ctx: &str,
+) -> AppResult<(String, Vec<(String, String)>)> {
+    let fid = parse_fetch_fid(ctx)
+        .ok_or_else(|| AppError::Api("取链上下文缺失，无法重新取链".into()))?;
+    let mut cookie = load_account_cookie(state, Platform::Quark, "请先登录夸克网盘")?;
+    if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
+        if refreshed != cookie {
+            persist_cookie(state, Platform::Quark, &refreshed, "");
+            cookie = refreshed;
+        }
+    }
+    let (url, _, _, download_cookie) = quark::get_download_link(&state.http, &fid, &cookie).await?;
+    Ok((
+        url,
+        vec![
+            ("Cookie".into(), download_cookie),
+            ("User-Agent".into(), quark::UA.into()),
+            ("Referer".into(), quark::DOWNLOAD_REFERER.into()),
+        ],
+    ))
 }
 
 // ---------- 百度高速通道（百度分享加速路由） ----------
@@ -323,6 +361,7 @@ async fn baidu_official_link(state: &AppState, session_key: &str, file: &ShareFi
         platform: "baidu".into(),
         cleanup_id: new_path,
         mirrors,
+        fetch_ctx: String::new(),
     })
 }
 
@@ -689,14 +728,14 @@ pub async fn get_download_link(
             // ① 转存路线（他人分享）：唯一子目录 tr_*（去重键每次不同，根治二次转存 404）
             //    → 转存 → 轮询 → 取链 → cleanup = 子目录 fid（下载完成后删整个子目录）
             // ② 直取路线（自己的分享，服务端拒绝转存自己的分享）：直接用分享 fid 取链
-            let (url, size, cleanup_id, download_cookie) = match quark_transfer_route(state, &session, &cookie, file).await {
+            let (url, size, cleanup_id, download_cookie, linked_fid) = match quark_transfer_route(state, &session, &cookie, file).await {
                 Ok(v) => v,
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("禁止转存自己的分享") {
                         state.log(crate::logger::INFO, "quark", "link", "自己的分享，跳过转存直接取链", &file.fname);
                         let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
-                        (url, size, String::new(), download_cookie)
+                        (url, size, String::new(), download_cookie, file.fid.clone())
                     } else {
                         return Err(e);
                     }
@@ -714,6 +753,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id,
                 mirrors: Vec::new(),
+                fetch_ctx: quark_fetch_ctx(&linked_fid),
             })
         }
         Platform::Uc => {
@@ -740,6 +780,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Baidu if session.accel => {
@@ -775,6 +816,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Baidu => {
@@ -814,6 +856,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: new_path,
                 mirrors,
+                fetch_ctx: String::new(),
             })
         }
         Platform::C139 => {
@@ -829,6 +872,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Pan123 => {
@@ -852,6 +896,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Xunlei => {
@@ -880,6 +925,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Direct => {
@@ -894,6 +940,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
         Platform::Magnet => {
@@ -906,6 +953,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
+                fetch_ctx: String::new(),
             })
         }
     }
@@ -943,8 +991,17 @@ pub async fn cleanup_baidu(state: &AppState, cleanup_path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{with_pwd_override, ResolveSession, ResolveSessions};
+    use super::{parse_fetch_fid, quark_fetch_ctx, with_pwd_override, ResolveSession, ResolveSessions};
     use crate::models::{ParsedShare, Platform};
+
+    #[test]
+    fn fetch_ctx_roundtrip_and_garbage_fallback() {
+        let ctx = quark_fetch_ctx("fid-123");
+        assert_eq!(parse_fetch_fid(&ctx).as_deref(), Some("fid-123"));
+        assert_eq!(parse_fetch_fid(""), None);
+        assert_eq!(parse_fetch_fid("not-json"), None);
+        assert_eq!(parse_fetch_fid("{\"fid\":\"\"}"), None);
+    }
 
     #[test]
     fn manual_password_overrides_detected_password() {

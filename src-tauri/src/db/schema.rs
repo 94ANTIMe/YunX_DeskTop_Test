@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS download_task (
     planned_total_size INTEGER NOT NULL DEFAULT 0,
     cleanup_id TEXT NOT NULL DEFAULT '',
     mirrors_json TEXT NOT NULL DEFAULT '[]',
+    fetch_ctx_json TEXT NOT NULL DEFAULT '',
     platform TEXT NOT NULL DEFAULT '',
     avg_speed INTEGER NOT NULL DEFAULT 0,
     create_time INTEGER NOT NULL,

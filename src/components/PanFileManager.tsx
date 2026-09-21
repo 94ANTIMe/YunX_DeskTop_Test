@@ -85,6 +85,7 @@ export default function PanFileManager({
         link.platform,
         link.cleanupId || undefined,
         link.mirrors || undefined,
+        link.fetchCtx || undefined,
       );
       setNotice(`已加入下载队列：${link.filename || file.fname}`);
       window.clearTimeout(noticeTimer.current);

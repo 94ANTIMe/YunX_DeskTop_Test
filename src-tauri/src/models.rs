@@ -111,6 +111,9 @@ pub struct DownloadLink {
     /// 多源站镜像下载链接（aria2 多源并发加速）
     #[serde(default)]
     pub mirrors: Vec<String>,
+    /// 重新取链上下文（JSON，仅夸克）：恢复/失败重试时按它重新取直链；空 = 不支持重取
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fetch_ctx: String,
 }
 
 /// 账号摘要（前端网盘页展示）

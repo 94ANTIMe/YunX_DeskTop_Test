@@ -368,6 +368,7 @@ async fn run_subscription_inner(app: &AppHandle, sub: &SubscriptionRow) -> Strin
                         &link.cleanup_id,
                         false,
                         link.mirrors,
+                        &link.fetch_ctx,
                     )
                     .await
                     {

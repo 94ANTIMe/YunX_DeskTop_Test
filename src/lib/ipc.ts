@@ -178,6 +178,8 @@ export interface DownloadLink {
   platform: string;
   cleanupId: string;
   mirrors?: string[];
+  /** 重新取链上下文（仅夸克）：恢复/失败重试时按它重新取直链 */
+  fetchCtx?: string;
 }
 
 export interface DownloadTask {
@@ -401,6 +403,7 @@ export const ipc = {
     platform: string,
     cleanupId?: string,
     mirrors?: string[],
+    fetchCtx?: string,
   ) =>
     invoke<number>("enqueue_download", {
       url,
@@ -409,6 +412,7 @@ export const ipc = {
       platform,
       cleanupId,
       mirrors,
+      fetchCtx,
     }),
   enqueueTorrent: (torrentData: number[], fileName: string) =>
     invoke<number>("enqueue_torrent", { torrentData, fileName }),

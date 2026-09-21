@@ -399,6 +399,44 @@ fn transfer_tuning(platform: &str, threads: i32, connections: i32, mirror_count:
     (split, connections.clamp(1, 16))
 }
 
+/// 夸克直链僵死守护：速度 ≤1KB/s 时由 aria2 中止任务，避免 0 速度永久占住并发槽。
+/// 中止后任务转失败态，用户点「开始」会走重新取链（见 resume）。
+fn stall_guard_options(platform: &str) -> Vec<(String, String)> {
+    if platform == "quark" {
+        vec![("lowest-speed-limit".into(), "1024".into())]
+    } else {
+        vec![]
+    }
+}
+
+/// HTTP 直链任务的 aria2 addUri 选项（纯函数，便于测试锁定参数组装）
+fn http_task_options(
+    dir: &str,
+    file_name: &str,
+    header_list: &[String],
+    split: i32,
+    max_connections: i32,
+    min_split: &str,
+    max_tries: i32,
+    extra: &[(String, String)],
+) -> Value {
+    let mut options = json!({
+        "dir": dir,
+        "out": sanitize_out_path(file_name),
+        "header": header_list,
+        "split": split,
+        "max-connection-per-server": max_connections,
+        "min-split-size": min_split,
+        "continue": "true",
+        "max-tries": max_tries,
+        "max-file-not-found": 3,
+    });
+    for (k, v) in extra {
+        options[k.as_str()] = json!(v);
+    }
+    options
+}
+
 // ---------- 启动（sidecar） ----------
 
 /// 引擎诊断日志（data_dir/engine.log；启动链路排查）
@@ -705,17 +743,17 @@ async fn add_to_aria2(
             "seed-time": "0",
         })
     } else {
-        json!({
-            "dir": dir.display().to_string(),
-            "out": sanitize_out_path(file_name),
-            "header": header_list,
-            "split": split,
-            "max-connection-per-server": max_connections,
-            "min-split-size": min_split,
-            "continue": "true",
-            "max-tries": settings.download_retry_count.clamp(0, 10),
-            "max-file-not-found": 3,
-        })
+        let extra = stall_guard_options(platform);
+        http_task_options(
+            &dir.display().to_string(),
+            file_name,
+            &header_list,
+            split,
+            max_connections,
+            &min_split,
+            settings.download_retry_count.clamp(0, 10),
+            &extra,
+        )
     };
     if start_paused {
         options["paused"] = json!("true");
@@ -753,6 +791,7 @@ pub async fn enqueue(
     cleanup_id: &str,
     start_paused: bool,
     mirrors: Vec<String>,
+    fetch_ctx: &str,
 ) -> AppResult<i64> {
     let state = app.state::<AppState>();
     // 入库前净化：删除原语（delete_local 拼路径）与重启恢复共用 DB 值，必须与 aria2 out 一致
@@ -766,9 +805,9 @@ pub async fn enqueue(
     let id = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, create_time, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0) RETURNING id",
-            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, mirrors_json, now],
+            "INSERT INTO download_task (url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, fetch_ctx_json, create_time, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0) RETURNING id",
+            rusqlite::params![url, file_name, headers_json, platform, cleanup_id, mirrors_json, fetch_ctx, now],
             |r| r.get::<_, i64>(0),
         )?
     };
@@ -867,10 +906,10 @@ pub async fn pause(app: &AppHandle, id: i64) -> AppResult<()> {
 /// 恢复
 pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     let state = app.state::<AppState>();
-    let (gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, status) = {
+    let (gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, status, fetch_ctx) = {
         let conn = state.db.lock().map_err(|_| AppError::Lock)?;
         conn.query_row(
-            "SELECT gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status FROM download_task WHERE id = ?1",
+            "SELECT gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status, fetch_ctx_json FROM download_task WHERE id = ?1",
             rusqlite::params![id],
             |r| {
                 Ok((
@@ -882,11 +921,13 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, i32>(7)?,
+                    r.get::<_, String>(8)?,
                 ))
             },
         )?
     };
 
+    let mut tell_gid = gid.clone();
     let mut unpaused = false;
     if !gid.is_empty() && status == DownloadTaskView::STATUS_PAUSED {
         if rpc_call("aria2.unpause", vec![json!(gid)]).await.is_ok() {
@@ -895,15 +936,53 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     }
 
     if !unpaused {
+        let mut url = url.clone();
+        let mut headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
+        // 直链与 __puus 都有时效：夸克任务走重入队（失败恢复 / unpause 失败）前先重新取链；
+        // 重新取链失败时沿用原直链恢复（可能仍可用），错误只记日志不阻断恢复。
+        if platform == "quark" && !fetch_ctx.is_empty() {
+            match crate::resolve::refresh_quark_download_link(&state, &fetch_ctx).await {
+                Ok((fresh_url, fresh_headers)) => {
+                    let fresh_headers_json = serde_json::to_string(&fresh_headers)?;
+                    {
+                        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+                        conn.execute(
+                            "UPDATE download_task SET url = ?1, request_headers_json = ?2 WHERE id = ?3",
+                            rusqlite::params![fresh_url, fresh_headers_json, id],
+                        )?;
+                    }
+                    url = fresh_url;
+                    headers = fresh_headers;
+                    state.log(crate::logger::INFO, "quark", "download", "恢复前已重新取链（直链已刷新）", &file_name);
+                }
+                Err(e) => {
+                    state.log(crate::logger::ERROR, "quark", "download", "重新取链失败，沿用原直链恢复", &e.to_string());
+                }
+            }
+        }
         // 重新入队 aria2（用于从失败态恢复或 unpause 失败时重入队，支持断点续传）
-        let headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
         let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
-        add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, false, mirrors).await?;
+        let new_gid = add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, false, mirrors).await?;
+        tell_gid = new_gid;
     }
 
-    update_status(app, id, DownloadTaskView::STATUS_DOWNLOADING, "").await?;
+    // 状态求实：unpause 后任务可能回到 aria2 等队列（waiting），
+    // 重新入队的任务也未必立刻 active——按引擎真实状态落库，查不到再回退排队态。
+    let real_status = tell_status_mapped(&tell_gid).await;
+    let new_status = real_status.unwrap_or(DownloadTaskView::STATUS_PENDING);
+    update_status(app, id, new_status, "").await?;
     push_list(app).await;
     Ok(())
+}
+
+/// 查单个 gid 的 aria2 状态并映射为任务状态；查不到 / 引擎不可达返回 None
+async fn tell_status_mapped(gid: &str) -> Option<i32> {
+    if gid.is_empty() {
+        return None;
+    }
+    let v = rpc_call("aria2.tellStatus", vec![json!(gid), json!(["status"])]).await.ok()?;
+    let status = v.get("status")?.as_str()?;
+    Some(map_status(status))
 }
 
 /// 删除任务（aria2 remove + DB 删除 + 转存清理）
@@ -1704,7 +1783,7 @@ pub async fn apply_settings(app: &AppHandle, settings: &Settings) -> AppResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, parse_status, proxy_log_summary, sanitize_out_path, transfer_tuning};
+    use super::{clear_targets, http_task_options, load_detail_row, mark_enqueue_failed_in_db, parse_status, proxy_log_summary, sanitize_out_path, stall_guard_options, transfer_tuning};
     use crate::error::AppError;
     use crate::models::Settings;
 
@@ -1727,6 +1806,37 @@ mod tests {
     fn quark_transfer_uses_conservative_single_server_connections() {
         let tuning = transfer_tuning("quark", 32, 16, 1);
         assert_eq!(tuning, (4, 4));
+    }
+
+    #[test]
+    fn only_quark_tasks_carry_lowest_speed_limit_guard() {
+        let quark = stall_guard_options("quark");
+        assert_eq!(quark, vec![("lowest-speed-limit".to_string(), "1024".to_string())]);
+        assert!(stall_guard_options("baidu").is_empty());
+        assert!(stall_guard_options("uc").is_empty());
+    }
+
+    #[test]
+    fn http_task_options_embed_extra_options_and_sanitize_out() {
+        let extra = stall_guard_options("quark");
+        let options = http_task_options(
+            "D:/downloads",
+            "../../evil.exe",
+            &["Cookie: __puus=live".to_string()],
+            4,
+            4,
+            "4M",
+            3,
+            &extra,
+        );
+        assert_eq!(options["out"], "evil.exe");
+        assert_eq!(options["split"], 4);
+        assert_eq!(options["max-connection-per-server"], 4);
+        assert_eq!(options["lowest-speed-limit"], "1024");
+        assert_eq!(options["continue"], "true");
+        let headers = options["header"].as_array().unwrap();
+        assert_eq!(headers.len(), 1);
+        assert!(headers[0].as_str().unwrap().starts_with("Cookie: "));
     }
 
     #[test]
