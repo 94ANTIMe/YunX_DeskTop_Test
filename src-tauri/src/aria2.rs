@@ -353,7 +353,11 @@ fn map_status(s: &str) -> i32 {
 }
 
 fn parse_status(v: &Value) -> TaskStatus {
-    let s = |key: &str| v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let s = |key: &str| match v.get(key) {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) if value.is_number() => value.to_string(),
+        _ => String::new(),
+    };
     let files = v
         .get("files")
         .and_then(|f| f.as_array())
@@ -363,14 +367,36 @@ fn parse_status(v: &Value) -> TaskStatus {
                 .collect()
         })
         .unwrap_or_default();
+    let error_code = s("errorCode");
+    let error_message = s("errorMessage");
+    let error_msg = if error_message.is_empty() && !error_code.is_empty() && error_code != "0" {
+        format!("aria2 错误码 {error_code}")
+    } else if !error_message.is_empty() && !error_code.is_empty() && error_code != "0" {
+        format!("{error_message}（aria2 错误码 {error_code}）")
+    } else {
+        error_message
+    };
     TaskStatus {
         status: s("status"),
         total: v.get("totalLength").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0),
         completed: v.get("completedLength").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0),
         speed: v.get("downloadSpeed").and_then(|x| x.as_str()).and_then(|x| x.parse().ok()).unwrap_or(0),
-        error_msg: s("errorMessage"),
+        error_msg,
         files,
     }
+}
+
+/// 夸克直链对 Range 并发和单主机连接数更敏感，采用保守参数避免 active 但 0 速度。
+fn transfer_tuning(platform: &str, threads: i32, connections: i32, mirror_count: usize) -> (i32, i32) {
+    if platform == "quark" {
+        return (threads.clamp(1, 4), connections.clamp(1, 4));
+    }
+    let split = if mirror_count > 1 {
+        (threads.clamp(16, 64) * (mirror_count as i32).min(2)).clamp(16, 64)
+    } else {
+        threads.clamp(1, 64)
+    };
+    (split, connections.clamp(1, 16))
 }
 
 // ---------- 启动（sidecar） ----------
@@ -661,12 +687,13 @@ async fn add_to_aria2(
         header_list.push(format!("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"));
     }
 
-    // 针对百度及多镜像任务优化并发连接：安全平衡多镜像吞吐，避免超过单 IP 并发上限导致 EOF 或中断
-    let split = if mirror_count > 1 {
-        (settings.download_threads.clamp(16, 64) * (mirror_count as i32).min(2)).clamp(16, 64)
-    } else {
-        settings.download_threads.clamp(1, 64)
-    };
+    // 针对百度及多镜像任务优化并发连接；夸克使用保守并发，避免 active 但 0 速度。
+    let (split, max_connections) = transfer_tuning(
+        platform,
+        settings.download_threads,
+        settings.download_conn_per_server,
+        mirror_count,
+    );
     let min_split = format!("{}M", settings.download_min_split_mb.clamp(1, 64));
 
     let is_magnet = url.starts_with("magnet:?");
@@ -683,7 +710,7 @@ async fn add_to_aria2(
             "out": sanitize_out_path(file_name),
             "header": header_list,
             "split": split,
-            "max-connection-per-server": settings.download_conn_per_server.clamp(1, 16),
+            "max-connection-per-server": max_connections,
             "min-split-size": min_split,
             "continue": "true",
             "max-tries": settings.download_retry_count.clamp(0, 10),
@@ -1677,7 +1704,7 @@ pub async fn apply_settings(app: &AppHandle, settings: &Settings) -> AppResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, proxy_log_summary, sanitize_out_path};
+    use super::{clear_targets, load_detail_row, mark_enqueue_failed_in_db, parse_status, proxy_log_summary, sanitize_out_path, transfer_tuning};
     use crate::error::AppError;
     use crate::models::Settings;
 
@@ -1694,6 +1721,22 @@ mod tests {
         assert!(line.contains("auth=true"));
         assert!(!line.contains("secret-user"));
         assert!(!line.contains("secret-password"));
+    }
+
+    #[test]
+    fn quark_transfer_uses_conservative_single_server_connections() {
+        let tuning = transfer_tuning("quark", 32, 16, 1);
+        assert_eq!(tuning, (4, 4));
+    }
+
+    #[test]
+    fn numeric_aria2_error_code_is_exposed_in_failure_message() {
+        let status = parse_status(&serde_json::json!({
+            "status": "error",
+            "errorCode": 13,
+            "errorMessage": "",
+        }));
+        assert_eq!(status.error_msg, "aria2 错误码 13");
     }
 
     #[test]

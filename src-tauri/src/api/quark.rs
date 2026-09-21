@@ -20,6 +20,7 @@ const SAVE_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/s
 const TASK_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=pc";
 const DELETE_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/file/delete?pr=ucpro&fr=pc&uc_param_str=";
 const CONFIG_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/config?pr=ucpro&fr=pc";
+const TRANSFER_POLL_ATTEMPTS: u32 = 60;
 
 fn set_cookies(resp: &reqwest::Response) -> Vec<String> {
     resp.headers()
@@ -96,6 +97,10 @@ pub async fn refresh_session(client: &Client, cookie: &str) -> AppResult<String>
     } else {
         Ok(cookie.to_string())
     }
+}
+
+fn merge_download_cookie(cookie: &str, set_cookies: &[String]) -> String {
+    merge_puus(cookie, set_cookies)
 }
 
 /// 分享 Token（stoken + 标题）
@@ -269,10 +274,10 @@ pub async fn save_share_file(
     Ok(task_id)
 }
 
-/// 轮询异步任务直到完成，返回转存后的新 fid（10 次 × 1s）
+/// 轮询异步任务直到完成，返回转存后的新 fid（60 次 × 1s）
 pub async fn poll_task(client: &Client, task_id: &str, cookie: &str) -> AppResult<String> {
     let url = format!("{TASK_URL}&task_id={}&retry_index=0", urlencoding::encode(task_id));
-    for _ in 0..10 {
+    for _ in 0..TRANSFER_POLL_ATTEMPTS {
         let resp = client
             .get(&url)
             .header("Cookie", cookie)
@@ -307,7 +312,7 @@ pub async fn get_download_link(
     client: &Client,
     fid: &str,
     cookie: &str,
-) -> AppResult<(String, String, i64)> {
+) -> AppResult<(String, String, i64, String)> {
     let body = json!({ "fids": [fid] });
     let resp = client
         .post(DOWNLOAD_URL)
@@ -316,6 +321,7 @@ pub async fn get_download_link(
         .json(&body)
         .send()
         .await?;
+    let download_cookie = merge_download_cookie(cookie, &set_cookies(&resp));
     let v: Value = resp.json().await?;
     let status = v.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
     let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
@@ -334,7 +340,7 @@ pub async fn get_download_link(
         let n = str_or(item, "file_name");
         if n.is_empty() { str_or(item, "filename") } else { n }
     };
-    Ok((url, filename, i64_or(item, "size")))
+    Ok((url, filename, i64_or(item, "size"), download_cookie))
 }
 
 /// 删除文件（清理临时转存；异步任务无需轮询）
@@ -351,4 +357,25 @@ pub async fn delete_file(client: &Client, fid: &str, cookie: &str) -> AppResult<
     // 删除失败不阻断主流程（忽略状态校验错误）
     let _ = check_status(&v, "清理临时文件失败");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_download_cookie, TRANSFER_POLL_ATTEMPTS};
+
+    #[test]
+    fn transfer_polling_allows_slow_quark_tasks() {
+        assert_eq!(TRANSFER_POLL_ATTEMPTS, 60);
+    }
+
+    #[test]
+    fn download_cookie_accepts_puus_refreshed_by_download_endpoint() {
+        let cookie = merge_download_cookie(
+            "__pus=old-pus; __puus=old-puus; other=x",
+            &["__puus=new-puus; Path=/; HttpOnly".into()],
+        );
+        assert!(cookie.contains("__puus=new-puus"));
+        assert!(cookie.contains("__pus=old-pus"));
+        assert!(cookie.contains("other=x"));
+    }
 }

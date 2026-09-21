@@ -183,12 +183,13 @@ pub async fn get_personal_download_link(
         }
         Platform::Quark => {
             let cookie = load_account_cookie(state, Platform::Quark, "请先在「网盘」页登录夸克账号")?;
-            let (url, filename, size) = crate::api::quark::get_download_link(&state.http, &file.fid, &cookie).await?;
+            let (url, filename, size, download_cookie) = crate::api::quark::get_download_link(&state.http, &file.fid, &cookie).await?;
             Ok(DownloadLink {
                 url,
                 filename: if !filename.is_empty() { filename } else { file.fname.clone() },
                 size: if size > 0 { size } else { file.fsize },
                 headers: vec![
+                    ("Cookie".into(), download_cookie),
                     ("User-Agent".into(), crate::api::quark::UA.into()),
                     ("Referer".into(), crate::api::quark::DOWNLOAD_REFERER.into()),
                 ],

@@ -159,14 +159,14 @@ fn persist_cookie(state: &AppState, platform: Platform, cookie: &str, nickname: 
 
 /// 夸克转存取链路线（他人分享）：
 /// 临时目录 → 唯一子目录 tr_*（去重键每次不同，根治二次转存 404 code:21001）
-/// → 转存 → 轮询 → 取链；返回 (url, size, 子目录 fid)（下载完成后删整个子目录）。
+/// → 转存 → 轮询 → 取链；返回 (url, size, 子目录 fid, 下载 Cookie)（下载完成后删整个子目录）。
 /// 自己的分享会因服务端拒绝转存抛错，由调用方走直取路线。
 async fn quark_transfer_route(
     state: &AppState,
     session: &ResolveSession,
     cookie: &str,
     file: &ShareFile,
-) -> AppResult<(String, i64, String)> {
+) -> AppResult<(String, i64, String, String)> {
     let base_dir = quark::ensure_temp_dir(&state.http, cookie).await?;
     let sub_dir = quark::create_transfer_subdir(&state.http, &base_dir, cookie).await?;
     let task_id = quark::save_share_file(
@@ -174,8 +174,8 @@ async fn quark_transfer_route(
     )
     .await?;
     let new_fid = quark::poll_task(&state.http, &task_id, cookie).await?;
-    let (url, _, size) = quark::get_download_link(&state.http, &new_fid, cookie).await?;
-    Ok((url, size, sub_dir))
+    let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &new_fid, cookie).await?;
+    Ok((url, size, sub_dir, download_cookie))
 }
 
 // ---------- 百度高速通道（百度分享加速路由） ----------
@@ -689,14 +689,14 @@ pub async fn get_download_link(
             // ① 转存路线（他人分享）：唯一子目录 tr_*（去重键每次不同，根治二次转存 404）
             //    → 转存 → 轮询 → 取链 → cleanup = 子目录 fid（下载完成后删整个子目录）
             // ② 直取路线（自己的分享，服务端拒绝转存自己的分享）：直接用分享 fid 取链
-            let (url, size, cleanup_id) = match quark_transfer_route(state, &session, &cookie, file).await {
+            let (url, size, cleanup_id, download_cookie) = match quark_transfer_route(state, &session, &cookie, file).await {
                 Ok(v) => v,
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("禁止转存自己的分享") {
                         state.log(crate::logger::INFO, "quark", "link", "自己的分享，跳过转存直接取链", &file.fname);
-                        let (url, _, size) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
-                        (url, size, String::new())
+                        let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
+                        (url, size, String::new(), download_cookie)
                     } else {
                         return Err(e);
                     }
@@ -707,7 +707,7 @@ pub async fn get_download_link(
                 filename: file.fname.clone(),
                 size: if file.fsize > 0 { file.fsize } else { size },
                 headers: vec![
-                    ("Cookie".into(), cookie),
+                    ("Cookie".into(), download_cookie),
                     ("User-Agent".into(), quark::UA.into()),
                     ("Referer".into(), quark::DOWNLOAD_REFERER.into()),
                 ],
