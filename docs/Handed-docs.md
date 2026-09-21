@@ -17,6 +17,26 @@
 
 ## 🔴 当前断点区
 
+**状态：空闲——当前无在途任务。**
+
+- 三线总任务全部完成：A 夸克缺陷修复（装机 D:\YunX，**真机复测待用户**）、B 前端界面升级（真机主题/键盘走查待做）、C 后端解耦。条目见时间轴。
+- 本地 commit 已到 `093aa69` 及文档提交，**均未 push**；全程未升版本号。
+- 已知暂缓项（按需再立项）：① ipc.ts 分域与 ResolvePage 区块深拆（理由见 ADR-0007 执行结果注记）；② LoginDialog 壳未迁 ui/Modal（WebView 登录）；③ 各平台真机解析/下载抽测未做。
+- 若用户真机复测夸克打回：按时间轴 A 线条目的预案插小型修复批次（单独 commit）。
+
+## 时间轴条目模板
+
+```markdown
+- **YYYY-MM-DD · 任务标题**
+  - 做了什么：一段话，讲「实际发生了什么变化」。
+  - 触点：改动的关键文件 / 设置项 / IPC 字段。
+  - 验证：按「自动测试 / 人工冒烟 / 未验证」三档，附命令与结果；不适用也要写明为什么不适用。
+  - 给产品的一句话：这次变更对使用者意味着什么。
+  - 遗留：未做完 / 已知限制 / 后续方向；没有就写「无」。
+```
+
+## 🔴 当前断点区
+
 **状态：进行中——C 线解耦模块化（三线总任务第三线；A、B 线已完成见时间轴）。**
 
 - 目标：后端结构解耦、行为零变化。顺序与验收：C1 ADR-0007（结构决策入档）→ C2 斩断 api↔resolve 循环依赖（`load_account_cookie` 下沉 `credentials.rs`，`cargo check` 证依赖方向）→ C3 api 公共层（quark/uc refresh_session 合并、公共轮询 helper、错误映射归一）→ C4 `PanPlatform` trait + resolve.rs 三段 match 改注册表（逐平台迁移，quark 先行，每迁一个全量测试）→ C5 aria2.rs 拆 `aria2/` 子模块（rpc/engine/tasks/policy，statics 收敛）→ C6 models.rs 拆 models/ 分域 + ipc.ts 分域（re-export 保路径）→ C7 前端收尾（STATUS_TEXT/平台注册表单一来源、ResolvePage 区块拆分）。
@@ -72,6 +92,13 @@
 ## 时间轴
 
 （最新在上，只追加）
+
+- **2026-09-22 · C 线：后端解耦（斩环 / api 公共层 / 平台 trait 化 / aria2 与 models 分域）**
+  - 做了什么：按 ADR-0007 完成 Rust 侧结构解耦——C2 `credentials.rs` 承接凭据读取，api 层对 resolve 引用清零（环斩断）；`quark_fetch_ctx` 归位 api/quark、百度验证码助手归位 api/baidu；C3 `set_cookies`/`refresh_puus_session` 上提 api 公共层（quark/uc 去重）；C4 `PanPlatform` trait 落地，9/9 平台（夸克/UC/百度/139/123/迅雷/直链/磁力）编排从三段巨型 match 迁入独立 impl，新增平台从「改 6 处」变「impl + 三行注册」；C5 `aria2.rs` 拆 policy/rpc/engine/mod(tasks) 四模块，6 个全局 static 随域归位；C6 `models.rs` 拆六域文件。C7 状态语义单一来源 `lib/download-status.ts`（STATUS_* + statusText），四处本地副本与魔法数字收编。轮询 helper 与错误映射统一经评估不做（形态各异，强行统一为负收益）；ipc.ts 分域与 ResolvePage 深拆暂缓（理由见 ADR-0007 执行结果注记）。
+  - 触点：新增 `credentials.rs`、`models/`（6 文件）、`aria2/`（mod/policy/rpc/engine）、`lib/download-status.ts`；改 `resolve.rs`、`api/{mod,quark,uc,baidu,pan_files,baidaccel}.rs`、`lib.rs`、`DownloadPage/TaskDetailDrawer/DownloadSummary/useDownloads`。IPC 契约与 DB 结构零变化。
+  - 验证：自动测试——每步 `cargo test` 27/27、`cargo check` 0 警告、`pnpm test` 56/56、`pnpm build` 通过；每步独立 commit（7063154…093aa69）。人工冒烟——解耦为纯结构重构，行为回归依赖既有 83 例自动化测试与后续真机使用；未做专门的真机全平台解析回归（未验证项：各平台真实分享链接解析/下载抽测）。
+  - 给产品的一句话：内部焕新、外表无感——九个网盘的对接逻辑各自归位，以后接新网盘是「培训一个新快递员」而不是「翻修整栋楼」，这段代码的下一位维护者（人或 AI）都能快速定位。
+  - 遗留：ipc.ts 分域与 ResolvePage 区块深拆（暂缓，理由入档）；architecture.md 增量修订随暂缓项一并处理；各平台真机抽测未做。
 
 - **2026-09-22 · B 线：前端界面整体升级（全局感知层 / 基础组件层 / 交互升级 / 清债）**
   - 做了什么：按用户提供的 ui-upgrade-plan.md 执行四阶段。B1 全局感知层：`useDownloads` 下载任务单例 store（事件合并/速度采样/终态迁移自动 toast/派生统计，隐藏页零重渲染保持）、全局 Toast（`lib/toast.ts` + ToastHost，aria-live）、顶栏下载角标+速度、四页反馈迁移 toast；B2 基础组件层：`components/ui/` 九个原语（Button/IconButton/Toggle/Select/Skeleton/SliderRow/Modal/Drawer/ConfirmDialog）+13 例单测，全部弹层（任务详情/批量队列/搜同款/订阅/收藏/历史/确认）迁入统一壳层，删旧 ConfirmDialog；B3 交互升级：解析多选批量下载、破坏性确认×8、Ctrl+1~7/Ctrl+V 快捷键、DrivePage 下拉 click-outside+Esc、StatsPage 柱状图键盘可达、Onboarding 三步修复、骨架屏×4、LogsPage 行 memo；B4 清债：SettingsPage 5 滑杆/3 下拉/2 开关收编 ui 原语，全库手写 select/range/switch/遮罩清零（LoginDialog 为登记例外），新约定写入 ui-and-themes.md，变更记录入 decisions.md。
