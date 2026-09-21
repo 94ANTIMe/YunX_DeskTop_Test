@@ -950,29 +950,7 @@ async fn build_session(
     let (files, title) = match platform {
         Platform::Quark => QuarkPlatform.fill_session(state, parsed, session).await?,
         Platform::Uc => UcPlatform.fill_session(state, parsed, session).await?,
-        Platform::Baidu => {
-            // 自动静默优先探测高速通道，不可用时毫秒级无感回退官方多镜像并发链路
-            match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
-                Ok(data) => {
-                    session.accel = true;
-                    session.accel_randsk = data.randsk.clone();
-                    session.accel_uk = data.uk.clone();
-                    session.accel_shareid = data.shareid.clone();
-                    state.log(logger::INFO, "baidu", "accel", "百度高速通道已启用", "");
-                    return Ok((data.files, data.uname));
-                }
-                Err(e) => {
-                    state.log(
-                        logger::INFO,
-                        "baidu",
-                        "accel",
-                        "加速通道未就绪，自动切入官方多源并发链路",
-                        &e.to_string(),
-                    );
-                }
-            }
-            baidu_official_session(state, parsed, session).await?
-        }
+        Platform::Baidu => BaiduPlatform.fill_session(state, parsed, session).await?,
         Platform::C139 => C139Platform.fill_session(state, parsed, session).await?,
         Platform::Pan123 => Pan123Platform.fill_session(state, parsed, session).await?,
         Platform::Xunlei => XunleiPlatform.fill_session(state, parsed, session).await?,
@@ -1003,19 +981,7 @@ pub async fn list_share_files(
     let (files, has_more) = match platform {
         Platform::Quark => QuarkPlatform.list_files(state, &mut session, dir_id, page).await?,
         Platform::Uc => UcPlatform.list_files(state, &mut session, dir_id, page).await?,
-        Platform::Baidu if session.accel => {
-            // 加速路由：dir_id 即分享内绝对路径；刷新后回写 randsk/uk/shareid
-            let data = accel_list(state, &session.share_id, &session.pwd, dir_id).await?;
-            session.accel_randsk = data.randsk.clone();
-            session.accel_uk = data.uk.clone();
-            session.accel_shareid = data.shareid.clone();
-            (data.files, false)
-        }
-        Platform::Baidu => {
-            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
-            let list = baidu::list_share(&state.http, &session.share_id, &session.sekey, dir_id, &cookie, page).await?;
-            (list.files, list.has_more)
-        }
+        Platform::Baidu => BaiduPlatform.list_files(state, &mut session, dir_id, page).await?,
         Platform::C139 => C139Platform.list_files(state, &mut session, dir_id, page).await?,
         Platform::Pan123 => Pan123Platform.list_files(state, &mut session, dir_id, page).await?,
         Platform::Xunlei => XunleiPlatform.list_files(state, &mut session, dir_id, page).await?,
@@ -1111,46 +1077,7 @@ pub async fn get_download_link(
                 fetch_ctx: String::new(),
             })
         }
-        Platform::Baidu => {
-            let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
-            let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
-            state.log(logger::INFO, "baidu", "transfer", "开始转存", &format!("{} → {}", file.fname, temp_dir));
-            let (new_fs_id, new_path) = baidu::transfer(
-                &state.http,
-                &session.share_id,
-                &session.baidu_share_id,
-                &session.baidu_uk,
-                &session.sekey,
-                &file.fid,
-                &temp_dir,
-                &cookie,
-            )
-            .await
-            .map_err(|e| {
-                state.log(logger::ERROR, "baidu", "transfer", &format!("转存失败：{}", file.fname), &e.to_string());
-                e
-            })?;
-            state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
-            // 取链改用 BaiduPCS-Go locate_urls（多地域源站镜像提取）
-            let urls = crate::baidupcs::locate_urls(&state.http, &cookie, &new_path, &state.data_dir)
-                .await
-                .map_err(|e| {
-                    state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
-                    e
-                })?;
-            let main_url = urls.first().cloned().unwrap_or_default();
-            let mirrors = if urls.len() > 1 { urls[1..].to_vec() } else { Vec::new() };
-            Ok(DownloadLink {
-                url: main_url,
-                filename: file.fname.clone(),
-                size: file.fsize,
-                headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
-                platform: platform.key().to_string(),
-                cleanup_id: new_path,
-                mirrors,
-                fetch_ctx: String::new(),
-            })
-        }
+        Platform::Baidu => BaiduPlatform.fetch_link(state, &session, file).await,
         Platform::C139 => C139Platform.fetch_link(state, &session, file).await,
         Platform::Pan123 => Pan123Platform.fetch_link(state, &session, file).await,
         Platform::Xunlei => XunleiPlatform.fetch_link(state, &session, file).await,
@@ -1212,6 +1139,109 @@ pub async fn cleanup_baidu(state: &AppState, cleanup_path: &str) {
             }
         }
         Err(error) => state.log(crate::logger::ERROR, "baidu", "cleanup", "缺少账号，无法清理临时转存", &error.to_string()),
+    }
+}
+
+
+/// 百度平台适配（加速通道优先、官方转存回退的双路由）
+struct BaiduPlatform;
+
+impl PanPlatform for BaiduPlatform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        // 自动静默优先探测高速通道，不可用时毫秒级无感回退官方多镜像并发链路
+        match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
+            Ok(data) => {
+                session.accel = true;
+                session.accel_randsk = data.randsk.clone();
+                session.accel_uk = data.uk.clone();
+                session.accel_shareid = data.shareid.clone();
+                state.log(logger::INFO, "baidu", "accel", "百度高速通道已启用", "");
+                return Ok((data.files, data.uname));
+            }
+            Err(e) => {
+                state.log(
+                    logger::INFO,
+                    "baidu",
+                    "accel",
+                    "加速通道未就绪，自动切入官方多源并发链路",
+                    &e.to_string(),
+                );
+            }
+        }
+        baidu_official_session(state, parsed, session).await
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        let platform = Platform::Baidu;
+        if session.accel {
+            // 加速路由：dir_id 即分享内绝对路径；刷新后回写 randsk/uk/shareid
+            let data = accel_list(state, &session.share_id, &session.pwd, dir_id).await?;
+            session.accel_randsk = data.randsk.clone();
+            session.accel_uk = data.uk.clone();
+            session.accel_shareid = data.shareid.clone();
+            return Ok((data.files, false));
+        }
+        let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
+        let list = baidu::list_share(&state.http, &session.share_id, &session.sekey, dir_id, &cookie, page).await?;
+        Ok((list.files, list.has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Baidu;
+        let cookie = load_account_cookie(state, platform, "请先登录百度网盘")?;
+        let temp_dir = baidu::ensure_temp_dir(&state.http, &cookie).await?;
+        state.log(logger::INFO, "baidu", "transfer", "开始转存", &format!("{} → {}", file.fname, temp_dir));
+        let (new_fs_id, new_path) = baidu::transfer(
+            &state.http,
+            &session.share_id,
+            &session.baidu_share_id,
+            &session.baidu_uk,
+            &session.sekey,
+            &file.fid,
+            &temp_dir,
+            &cookie,
+        )
+        .await
+        .map_err(|e| {
+            state.log(logger::ERROR, "baidu", "transfer", &format!("转存失败：{}", file.fname), &e.to_string());
+            e
+        })?;
+        state.log(logger::SUCCESS, "baidu", "transfer", "转存成功", &format!("fs_id={new_fs_id} path={new_path}"));
+        // 取链改用 BaiduPCS-Go locate_urls（多地域源站镜像提取）
+        let urls = crate::baidupcs::locate_urls(&state.http, &cookie, &new_path, &state.data_dir)
+            .await
+            .map_err(|e| {
+                state.log(logger::ERROR, "baidu", "link", "取链失败", &format!("path={new_path} {e}"));
+                e
+            })?;
+        let main_url = urls.first().cloned().unwrap_or_default();
+        let mirrors = if urls.len() > 1 { urls[1..].to_vec() } else { Vec::new() };
+        Ok(DownloadLink {
+            url: main_url,
+            filename: file.fname.clone(),
+            size: file.fsize,
+            headers: vec![("User-Agent".into(), crate::baidupcs::UA.into())],
+            platform: platform.key().to_string(),
+            cleanup_id: new_path,
+            mirrors,
+            fetch_ctx: String::new(),
+        })
     }
 }
 

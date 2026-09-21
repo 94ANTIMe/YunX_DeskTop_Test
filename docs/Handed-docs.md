@@ -26,7 +26,8 @@
 - 已完成（C2 斩环，2026-09-22）：新增 `src-tauri/src/credentials.rs`（`load_account_cookie` 从 resolve 下沉，含「刚登录未落库」窗口期语义注释）；`quark_fetch_ctx` 移入 `api/quark.rs`（夸克域逻辑归 api）；`is_captcha_blocked`/`captcha_hint` 移入 `api/baidu.rs`（百度域错误映射归 api）；`api/pan_files.rs`、`api/baidaccel.rs` 全部改引 credentials/baidu/quark——api 层对 resolve 的引用清零（grep 验证），api→resolve 单向依赖成立。验证：`cargo test` 27/27、`cargo check` 0 警告、`pnpm test` 56/56。
 - 已完成（C3 api 公共层，2026-09-22）：`api/mod.rs` 上提 `set_cookies`（原 quark/uc 各自手抄）与 `refresh_puus_session`（夸克/UC 会话刷新同构逻辑合并，剥 __puus → config → 合并轮换 Cookie）；两平台 `refresh_session` 变一行委托。**轮询 helper 与错误映射归一经评估不做**：六套轮询中四个是事件循环（aria2 poll/clipboard/login/subscription）语义各异，baidupcs(300ms 无计数) 与 quark(1s 带失败计数) 形态不同，强行统一是为合并而合并；各家错误结构（pan123 code/xunlei error_code/baidu errno）本质是不同 API 契约，统一层依赖 C4 trait 先定义每平台错误语义，随 C4 一并考虑。
 - 已完成（C4 主体，2026-09-22）：`resolve.rs` 定义 `PanPlatform` trait（fill_session/list_files/fetch_link，原生 async fn in trait 静态分发，无新依赖），已迁移 7/9 平台：Quark（试点）、Uc、C139、Pan123、Xunlei（clone_runtime 助手收敛运行时克隆）、Direct、Magnet——三段 match 的对应分支变一行委托，编排体内聚到各 impl。行为还原细节：Pan123 list 的 `dir_changed` 语义改由 impl 读 `session.last_dir` 自行判定（调用方回写时序不变）；Xunlei 运行时克隆/登录校验收敛 `clone_runtime`。Baidu（accel 双路由 + official 回退）待迁，是 C4 最后一步。验证：`cargo test` 27/27、`cargo check` 0 警告、`pnpm test` 56/56。
-- 当前计划：C4 收尾迁 Baidu → C5 aria2.rs 拆分 → C6 models/ipc 分域 → C7 前端收尾。
+- 已完成（C4 收官，2026-09-22）：BaiduPlatform 迁入（fill/list/fetch_link 三段，accel 双路由收敛为 impl 内分支，list 的两个守卫臂合一）。**9/9 平台全部完成 PanPlatform trait 化**；resolve.rs 三段 match 各剩 9 行一行委托；新增平台 = api/<plat>.rs 落接口 + impl PanPlatform + 三行注册。验证：`cargo test` 27/27、0 警告、`pnpm test` 56/56、`pnpm build` 通过。
+- 当前计划：C5 aria2.rs 拆分（rpc/engine/tasks/policy 子模块 + statics 收敛，动 poll_loop 前先补表征测试）→ C6 models/ipc 分域 → C7 前端收尾。
 - 不改：行为与语义（纯结构重构）、IPC 契约、DB 结构、版本号；不 push。
 - 若用户真机复测打回夸克修复：插一个小型 Rust 修复批次（单独 commit），再继续 C 线。
 - 提交均为本地 commit（`e7ca036`…`30eaaf5` 及文档提交），**未 push**；不升版本号。
