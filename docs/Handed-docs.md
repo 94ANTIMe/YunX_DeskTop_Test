@@ -24,7 +24,8 @@
 - 基线 commit：`6431a18`（B 线完成点）。
 - 已完成：C1 ADR-0007 入档（决策与取舍，规范性 architecture.md 修订随各步落地——按「新规范先落地再写进规范」规则拆分执行）。
 - 已完成（C2 斩环，2026-09-22）：新增 `src-tauri/src/credentials.rs`（`load_account_cookie` 从 resolve 下沉，含「刚登录未落库」窗口期语义注释）；`quark_fetch_ctx` 移入 `api/quark.rs`（夸克域逻辑归 api）；`is_captcha_blocked`/`captcha_hint` 移入 `api/baidu.rs`（百度域错误映射归 api）；`api/pan_files.rs`、`api/baidaccel.rs` 全部改引 credentials/baidu/quark——api 层对 resolve 的引用清零（grep 验证），api→resolve 单向依赖成立。验证：`cargo test` 27/27、`cargo check` 0 警告、`pnpm test` 56/56。
-- 当前计划：C3 api 公共层（quark/uc refresh_session 合并、公共轮询 helper、错误映射归一）→ C4 PanPlatform trait 逐平台迁移（quark 先行）→ C5 aria2.rs 拆分 → C6 models/ipc 分域 → C7 前端收尾。
+- 已完成（C3 api 公共层，2026-09-22）：`api/mod.rs` 上提 `set_cookies`（原 quark/uc 各自手抄）与 `refresh_puus_session`（夸克/UC 会话刷新同构逻辑合并，剥 __puus → config → 合并轮换 Cookie）；两平台 `refresh_session` 变一行委托。**轮询 helper 与错误映射归一经评估不做**：六套轮询中四个是事件循环（aria2 poll/clipboard/login/subscription）语义各异，baidupcs(300ms 无计数) 与 quark(1s 带失败计数) 形态不同，强行统一是为合并而合并；各家错误结构（pan123 code/xunlei error_code/baidu errno）本质是不同 API 契约，统一层依赖 C4 trait 先定义每平台错误语义，随 C4 一并考虑。
+- 当前计划：C4 PanPlatform trait 逐平台迁移（quark 先行，每迁一个全量测试）→ C5 aria2.rs 拆分 → C6 models/ipc 分域 → C7 前端收尾。
 - 不改：行为与语义（纯结构重构）、IPC 契约、DB 结构、版本号；不 push。
 - 若用户真机复测打回夸克修复：插一个小型 Rust 修复批次（单独 commit），再继续 C 线。
 - 提交均为本地 commit（`e7ca036`…`30eaaf5` 及文档提交），**未 push**；不升版本号。

@@ -4,7 +4,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::{merge_puus, without_puus};
+use super::{merge_puus, refresh_puus_session, set_cookies};
 use crate::error::{AppError, AppResult};
 use crate::models::ShareFile;
 
@@ -21,14 +21,6 @@ const TASK_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=
 const DELETE_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/file/delete?pr=ucpro&fr=pc&uc_param_str=";
 const CONFIG_URL: &str = "https://drive-pc.quark.cn/1/clouddrive/config?pr=ucpro&fr=pc";
 const TRANSFER_POLL_ATTEMPTS: u32 = 60;
-
-fn set_cookies(resp: &reqwest::Response) -> Vec<String> {
-    resp.headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok().map(String::from))
-        .collect()
-}
 
 /// parseData：status != 200 → 透传 message
 fn check_status<'a>(v: &'a Value, fallback: &str) -> AppResult<&'a Value> {
@@ -84,19 +76,7 @@ pub fn is_valid_cookie(cookie: &str) -> bool {
 
 /// 刷新会话 Cookie（剥离 __puus → /config → Set-Cookie 重下发合并）
 pub async fn refresh_session(client: &Client, cookie: &str) -> AppResult<String> {
-    let resp = client
-        .get(CONFIG_URL)
-        .header("Cookie", without_puus(cookie))
-        .header("User-Agent", UA)
-        .header("Referer", DOWNLOAD_REFERER)
-        .send()
-        .await?;
-    let merged = merge_puus(cookie, &set_cookies(&resp));
-    if merged != cookie {
-        Ok(merged)
-    } else {
-        Ok(cookie.to_string())
-    }
+    refresh_puus_session(client, CONFIG_URL, UA, DOWNLOAD_REFERER, cookie).await
 }
 
 fn merge_download_cookie(cookie: &str, set_cookies: &[String]) -> String {

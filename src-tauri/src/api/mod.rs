@@ -108,6 +108,34 @@ pub fn merge_puus(original: &str, set_cookies: &[String]) -> String {
 }
 
 /// 剥离 __puus（触发服务端重新下发）
+/// 提取响应 Set-Cookie 头列表（quark/uc 共用；原两文件各自手抄，上提到公共层）
+pub(crate) fn set_cookies(resp: &reqwest::Response) -> Vec<String> {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect()
+}
+
+/// 分享会话刷新（夸克 / UC 同构）：剥掉旧 __puus 请求 config 接口，
+/// 用响应下发的 Set-Cookie 合并出新 Cookie（服务端轮换 __puus）。
+pub(crate) async fn refresh_puus_session(
+    client: &Client,
+    config_url: &str,
+    ua: &str,
+    referer: &str,
+    cookie: &str,
+) -> crate::error::AppResult<String> {
+    let resp = client
+        .get(config_url)
+        .header("Cookie", without_puus(cookie))
+        .header("User-Agent", ua)
+        .header("Referer", referer)
+        .send()
+        .await?;
+    Ok(merge_puus(cookie, &set_cookies(&resp)))
+}
+
 pub fn without_puus(cookie: &str) -> String {
     cookie
         .split(';')

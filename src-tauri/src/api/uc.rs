@@ -3,7 +3,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use super::{merge_puus, without_puus};
+use super::refresh_puus_session;
 use crate::error::{AppError, AppResult};
 use crate::models::ShareFile;
 
@@ -14,14 +14,6 @@ const SHARE_TOKEN_URL: &str = "https://pc-api.uc.cn/1/clouddrive/share/sharepage
 const TRANSFER_SHARE_DETAIL_URL: &str = "https://pc-api.uc.cn/1/clouddrive/transfer_share/detail?entry=ft&fr=pc&pr=UCBrowser";
 const DOWNLOAD_URL: &str = "https://pc-api.uc.cn/1/clouddrive/file/download?entry=ft&fr=pc&pr=UCBrowser";
 const CONFIG_URL: &str = "https://pc-api.uc.cn/1/clouddrive/config?pr=UCBrowser&fr=pc";
-
-fn set_cookies(resp: &reqwest::Response) -> Vec<String> {
-    resp.headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok().map(String::from))
-        .collect()
-}
 
 fn check_status<'a>(v: &'a Value, fallback: &str) -> AppResult<&'a Value> {
     let status = v.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
@@ -82,15 +74,7 @@ pub fn is_valid_cookie(cookie: &str) -> bool {
 
 /// 刷新会话 Cookie（同夸克 refreshPuus）
 pub async fn refresh_session(client: &Client, cookie: &str) -> AppResult<String> {
-    let resp = client
-        .get(CONFIG_URL)
-        .header("Cookie", without_puus(cookie))
-        .header("User-Agent", UA)
-        .header("Referer", DOWNLOAD_REFERER)
-        .send()
-        .await?;
-    let merged = merge_puus(cookie, &set_cookies(&resp));
-    Ok(merged)
+    refresh_puus_session(client, CONFIG_URL, UA, DOWNLOAD_REFERER, cookie).await
 }
 
 /// 分享 Token（stoken + 标题）
