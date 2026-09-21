@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { errMsg, ipc, type ShareFile } from "../lib/ipc";
+import { toast } from "../lib/toast";
 import { formatBytes, platformLabel } from "../lib/format";
 import CrossDriveSearchModal from "./CrossDriveSearchModal";
 import type { TabId } from "../lib/tabs";
@@ -40,9 +41,6 @@ export default function PanFileManager({
   const [loading, setLoading] = useState(false);
   const [downloadingFid, setDownloadingFid] = useState<string | null>(null);
   const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
-  const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
-  const noticeTimer = useRef<number | undefined>(undefined);
 
   const currentDir = crumbs[crumbs.length - 1];
 
@@ -52,12 +50,11 @@ export default function PanFileManager({
 
   async function loadDir(fid: string) {
     setLoading(true);
-    setError("");
     try {
       const list = await ipc.listPersonalFiles(platform, fid);
       setFiles(list);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setLoading(false);
     }
@@ -75,7 +72,6 @@ export default function PanFileManager({
   async function downloadPersonalFile(file: ShareFile) {
     if (downloadingFid) return;
     setDownloadingFid(file.fid);
-    setError("");
     try {
       const link = await ipc.getPersonalDownloadLink(platform, file);
       await ipc.enqueueDownload(
@@ -87,12 +83,10 @@ export default function PanFileManager({
         link.mirrors || undefined,
         link.fetchCtx || undefined,
       );
-      setNotice(`已加入下载队列：${link.filename || file.fname}`);
-      window.clearTimeout(noticeTimer.current);
-      noticeTimer.current = window.setTimeout(() => setNotice(""), 3000);
+      toast.success(`已加入下载队列：${link.filename || file.fname}`);
       onNavigate("download");
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setDownloadingFid(null);
     }
@@ -149,16 +143,6 @@ export default function PanFileManager({
       </div>
 
       {/* 提示条 */}
-      {error && (
-        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-xs text-danger">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-xs text-ink font-medium">
-          {notice}
-        </div>
-      )}
 
       {/* 文件列表区 */}
       <div className="rounded-card bg-carrier border border-ink/10 overflow-hidden">

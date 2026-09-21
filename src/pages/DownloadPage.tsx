@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   ArrowRight,
@@ -17,8 +17,9 @@ import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import DownloadSummary from "../components/DownloadSummary";
 import TaskDetailDrawer from "../components/TaskDetailDrawer";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { errMsg, ipc, onDownloadsUpdated, type DownloadTask } from "../lib/ipc";
+import { errMsg, ipc, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatRemain, formatSpeed, platformLabel } from "../lib/format";
+import { clearLocalTasks, forgetTask, getSpeedHistory, useDownloadsState } from "../hooks/useDownloads";
 import type { TabId } from "../lib/tabs";
 import emptyArt from "../assets/art/empty-downloads.jpg";
 
@@ -37,51 +38,6 @@ const STATUS_TEXT: Record<number, string> = {
   3: "已完成",
   4: "失败",
 };
-
-/** 速度采样点数（约 40 秒窗口，1s 一采） */
-const SPEED_POINTS = 40;
-
-/** 关键字段浅比较（id 相同的任务）：全部一致视为无变化 */
-function taskEquals(a: DownloadTask, b: DownloadTask): boolean {
-  return (
-    a.status === b.status &&
-    a.downloadedSize === b.downloadedSize &&
-    a.totalSize === b.totalSize &&
-    a.speed === b.speed &&
-    a.errorMsg === b.errorMsg &&
-    a.savePath === b.savePath
-  );
-}
-
-/** 与后端一致的展示排序：进行中（0/1/2）优先，其后按 id 倒序 */
-function compareTasks(a: DownloadTask, b: DownloadTask): number {
-  const active = (s: number) => (s === 0 || s === 1 || s === 2 ? 0 : 1);
-  return active(a.status) - active(b.status) || b.id - a.id;
-}
-
-/** 事件任务合并：无变化复用旧对象引用（memo 行组件与抽屉才能跳过重渲染）；整体无变化返回 null（调用方跳过 setState）。
- *  终态任务若从事件快照中消失（滑出 24h 窗口 / 已在别处删除）同步移除，避免留下进度冻结的僵尸行。 */
-function mergeTasks(prev: DownloadTask[], updated: DownloadTask[]): DownloadTask[] | null {
-  let changed = false;
-  const byId = new Map(prev.map((t) => [t.id, t]));
-  const seen = new Set<number>();
-  for (const t of updated) {
-    seen.add(t.id);
-    const old = byId.get(t.id);
-    if (!old || !taskEquals(old, t)) {
-      byId.set(t.id, t);
-      changed = true;
-    }
-  }
-  for (const [id, t] of byId) {
-    if (!seen.has(id) && (t.status === 3 || t.status === 4)) {
-      byId.delete(id);
-      changed = true;
-    }
-  }
-  if (!changed) return null;
-  return [...byId.values()].sort(compareTasks);
-}
 
 interface TaskCardProps {
   task: DownloadTask;
@@ -238,60 +194,15 @@ const TaskCard = memo(function TaskCard({
   );
 });
 
-/** 下载页：聚合摘要条 + 任务列表 + 右侧详情抽屉（事件驱动 + 全量兜底） */
+/** 下载页：聚合摘要条 + 任务列表 + 右侧详情抽屉（store 单例驱动，事件合并/采样在 useDownloads） */
 function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
-  const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  // 隐藏时快照恒定（零重渲染），激活即恢复最新任务列表
+  const { tasks } = useDownloadsState(active);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
-  // 速度采样历史（id → 最近 N 个速度点；事件驱动写入，页面隐藏时也持续记录）
-  const speedHistory = useRef<Map<number, number[]>>(new Map());
-  // 非激活期间暂存最新事件快照，激活时一次性 flush
-  const pendingTasks = useRef<DownloadTask[] | null>(null);
-  const activeRef = useRef(active);
-
-  // 初始全量 + 事件实时更新（合并：全量为底，事件覆盖同 id；终态由后端事件流保留 24h）
-  useEffect(() => {
-    let mounted = true;
-    ipc
-      .listDownloadTasks()
-      .then((list) => mounted && setTasks(list))
-      .catch(() => {});
-    const un = onDownloadsUpdated((updated) => {
-      // 速度采样（仅进行中任务）
-      for (const t of updated) {
-        if (t.status === 1) {
-          const arr = speedHistory.current.get(t.id) ?? [];
-          arr.push(t.speed);
-          if (arr.length > SPEED_POINTS) arr.shift();
-          speedHistory.current.set(t.id, arr);
-        }
-      }
-      // 页面隐藏：只暂存快照，不触发渲染
-      if (!activeRef.current) {
-        pendingTasks.current = updated;
-        return;
-      }
-      // 无变化不 setTasks（后端已带变更检测，此处兜底合并层再滤一次）
-      setTasks((prev) => mergeTasks(prev, updated) ?? prev);
-    });
-    return () => {
-      mounted = false;
-      un.then((f) => f());
-    };
-  }, []);
-
-  // 页面重新激活：flush 暂存的事件快照
-  useEffect(() => {
-    activeRef.current = active;
-    if (active && pendingTasks.current) {
-      const pending = pendingTasks.current;
-      pendingTasks.current = null;
-      setTasks((prev) => mergeTasks(prev, pending) ?? prev);
-    }
-  }, [active]);
 
   const act = useCallback(async (id: number, fn: () => Promise<void>) => {
     setBusyId(id);
@@ -330,9 +241,8 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
     setError("");
     try {
       await ipc.clearDownloadTasks();
-      setTasks([]);
+      clearLocalTasks();
       setOpenId(null);
-      speedHistory.current.clear();
     } catch (e) {
       setError(errMsg(e));
     }
@@ -346,7 +256,7 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
     (id: number) =>
       void act(id, async () => {
         await ipc.removeDownloadTask(id, false);
-        setTasks((list) => list.filter((x) => x.id !== id));
+        forgetTask(id);
       }),
     [act],
   );
@@ -410,7 +320,7 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
       {/* 任务详情抽屉（右侧滑入，单例） */}
       <TaskDetailDrawer
         task={openTask}
-        history={openId != null ? (speedHistory.current.get(openId) ?? []) : []}
+        history={openId != null ? getSpeedHistory(openId) : []}
         onClose={() => setOpenId(null)}
       />
 

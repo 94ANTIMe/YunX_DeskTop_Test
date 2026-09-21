@@ -4,6 +4,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Bell, Check, ChevronDown, ClipboardPaste, Download, ExternalLink, FolderOpen, Globe, Loader2, Magnet, Minimize2, Power, RefreshCw, Rss, Search, ShieldCheck, Wifi } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { errMsg, ipc, onSettingsUpdated, DEFAULT_SETTINGS, type AppInfo, type Settings as SettingsT } from "../lib/ipc";
+import { toast } from "../lib/toast";
 import { useUpdate } from "../hooks/useUpdate";
 import { formatBytes } from "../lib/format";
 import type { ThemeMode } from "../hooks/useTheme";
@@ -195,8 +196,6 @@ function ThemeCard({
 export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange, onNavigate }: SettingsPageProps) {
   const [settings, setSettings] = useState<SettingsT | null>(null);
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
   const settingsRef = useRef<SettingsT | null>(null);
@@ -207,14 +206,7 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
   const updater = useUpdate();
   // 开源致谢折叠状态：仅保留于当前应用会话（重启后收起；切换设置页不卸载故状态保留）
   const [ackOpen, setAckOpen] = useState(false);
-  const noticeTimer = useRef<number | undefined>(undefined);
 
-  /** 带自动消失的提示：先清掉上一个定时器，避免旧提示把新提示提前清掉 */
-  function flashNotice(msg: string, ms = 3500) {
-    setNotice(msg);
-    window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(""), ms);
-  }
 
   // 初始加载失败时保留错误，由恢复页显式重试。
   async function loadSettings() {
@@ -245,10 +237,10 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
         const result = await ipc.updateSettings(snapshot);
         // 设置已保存；仅当下载引擎同步失败时给非阻塞提示（重启引擎后生效），不报错、不回滚
         if (result?.engineSyncFailed) {
-          flashNotice(`设置已保存；下载引擎暂未同步（${result.engineSyncError || "引擎未响应"}）`, 6000);
+          toast.info(`设置已保存；下载引擎暂未同步（${result.engineSyncError || "引擎未响应"}）`);
         }
       } catch (cause) {
-        setError(`${errMsg(cause)}；已重新读取后端设置`);
+        toast.error(`${errMsg(cause)}；已重新读取后端设置`);
         savePending.current = false;
         try {
           const restored = { ...DEFAULT_SETTINGS, ...(await ipc.getSettings()) };
@@ -285,7 +277,6 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
     const merged = { ...(settingsRef.current ?? rendered), ...patch } as SettingsT;
     settingsRef.current = merged;
     setSettings(merged);
-    setError("");
     savePending.current = true;
     await flushSettings();
   }
@@ -328,10 +319,10 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
       const dir = typeof selected === "string" ? selected : selected?.[0];
       if (dir) {
         await persist({ ...settings, downloadDir: dir });
-        flashNotice("下载目录已更新（新任务生效）");
+        toast.success("下载目录已更新（新任务生效）");
       }
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -340,7 +331,7 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
     if (!settings) return;
     const trimmed = url.trim().replace(/\/+$/, "");
     await persist({ ...settings, pansouBaseUrl: trimmed });
-    flashNotice(trimmed ? "搜索服务地址已保存" : "已清除搜索服务地址");
+    toast.success(trimmed ? "搜索服务地址已保存" : "已清除搜索服务地址");
   }
 
   function goSearchTab() {
@@ -353,12 +344,6 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
     <div className="space-y-6">
       <PageHeader tab="settings" subtitle="外观、下载与关于" />
 
-      {error && (
-        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</div>
-      )}
       {loadError && !s && (
         <section className="rounded-card bg-carrier p-6">
           <h3 className="text-sm font-semibold text-danger">设置读取失败</h3>
@@ -759,11 +744,10 @@ export default function SettingsPage({ themeMode, colorTheme, onAppearanceChange
                     onClick={async () => {
                       setProxyTesting(true);
                       setProxyResult(null);
-                      setError("");
                       try {
                         setProxyResult(await ipc.testProxy());
                       } catch (e) {
-                        setError(errMsg(e));
+                        toast.error(errMsg(e));
                       } finally {
                         setProxyTesting(false);
                       }

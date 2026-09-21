@@ -19,6 +19,7 @@ import PageHeader from "../components/PageHeader";
 import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import BatchQueuePanel from "../components/BatchQueuePanel";
 import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
+import { toast } from "../lib/toast";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
 import resolveHero from "../assets/art/resolve-hero.jpg";
@@ -91,8 +92,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [loadingDir, setLoadingDir] = useState(false);
   const [downloadingFid, setDownloadingFid] = useState<string | null>(null);
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   /** 文件夹收集进度（收集 + 逐个取链入队） */
   const [folderProgress, setFolderProgress] = useState<{ name: string; done: number; total: number } | null>(null);
   const [showBookmarks, setShowBookmarks] = useState(false);
@@ -106,16 +105,15 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [isDragging, setIsDragging] = useState(false);
   /** 批量链接队列面板 */
   const [showBatch, setShowBatch] = useState(false);
-  const noticeTimer = useRef<number | undefined>(undefined);
   /** 解析进行中收到的新请求（后发优先：当前解析结束后自动开始，避免静默丢弃） */
   const queuedResolve = useRef<{ link: string; pwd: string } | null>(null);
   /** 解析在飞标志（ref 而非 state：队列续接时闭包内读到的一定是最新值） */
   const resolvingRef = useRef(false);
 
+  /** 即时反馈迁移为全局 toast：读取类提示用 info，其余成功语义 */
   const showNotice = (msg: string) => {
-    setNotice(msg);
-    window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(""), 4000);
+    if (msg.startsWith("正在读取")) toast.info(msg);
+    else toast.success(msg);
   };
 
   async function handleDrop(e: React.DragEvent) {
@@ -134,7 +132,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
           onNavigate("download");
           return;
         } catch (err) {
-          setError(errMsg(err));
+          toast.error(errMsg(err));
           return;
         }
       }
@@ -158,7 +156,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     }
     resolvingRef.current = true;
     setResolving(true);
-    setError("");
     try {
       const info = await ipc.resolveShare(t, (pwdOverride ?? pwd).trim() || undefined);
       setSession(info);
@@ -181,7 +178,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       if (info.title) showNotice(`已解析：${info.title}`);
       ipc.listResolveHistory().then(setHistory).catch(() => {});
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       resolvingRef.current = false;
       setResolving(false);
@@ -212,7 +209,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   async function openDir(entry: ShareFile) {
     if (!session || loadingDir) return;
     setLoadingDir(true);
-    setError("");
     try {
       const result = await ipc.listShareFiles(session.sessionKey, entry.fid, 1);
       setFiles(result.files);
@@ -220,7 +216,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setDirStack((s) => [...s, { fid: entry.fid, name: entry.fname }]);
       setPage(1);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setLoadingDir(false);
     }
@@ -238,7 +234,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setDirStack((s) => s.slice(0, index + 1));
       setPage(1);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setLoadingDir(false);
     }
@@ -259,7 +255,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setHasMore(result.hasMore);
       setPage(next);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setLoadingDir(false);
     }
@@ -284,7 +280,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       );
       return res;
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
       setTreeRoot((r) => (r ? updateTreeRoot(r, node.fid, { loading: false }) : r));
       return null;
     }
@@ -310,7 +306,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setDirStack(node.path);
       setPage(1);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setLoadingDir(false);
     }
@@ -359,7 +355,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   async function downloadFile(file: ShareFile) {
     if (!session || downloadingFid) return;
     setDownloadingFid(file.fid);
-    setError("");
     try {
       const link = await ipc.getDownloadLink(session.sessionKey, file);
       await ipc.enqueueDownload(
@@ -374,7 +369,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       showNotice(`已加入下载：${link.filename || file.fname}`);
       onNavigate("download");
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setDownloadingFid(null);
     }
@@ -385,7 +380,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     if (!session || folderBusy) return;
     setFolderBusy(entry.fid);
     setFolderProgress(null);
-    setError("");
     try {
       const collected = await ipc.collectFolderFiles(session.sessionKey, entry.fid);
       if (collected.length === 0) {
@@ -419,7 +413,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       showNotice(`已入队 ${done} 个文件${failed > 0 ? `，${failed} 个失败（详见日志）` : ""}`);
       if (done > 0) onNavigate("download");
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setFolderBusy(null);
       setFolderProgress(null);
@@ -434,7 +428,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       await ipc.addBookmark(link, session?.title ?? "", pwd);
       showNotice("已收藏该链接");
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -444,7 +438,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setBookmarks(await ipc.listBookmarks());
       setShowBookmarks(true);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -453,7 +447,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       await ipc.removeBookmark(id);
       setBookmarks((b) => b.filter((x) => x.id !== id));
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -463,7 +457,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       setHistory(await ipc.listResolveHistory());
       setShowHistory(true);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -472,7 +466,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       await ipc.deleteResolveHistory(id);
       setHistory((h) => h.filter((x) => x.id !== id));
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -481,7 +475,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       await ipc.clearResolveHistory();
       setHistory([]);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -608,12 +602,6 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             可切换到「日志」页查看每一步详情；切换栏目不会中断收集
           </p>
         </div>
-      )}
-      {error && (
-        <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</div>
       )}
 
       {/* 解析结果：面包屑 + 文件列表 */}

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import TopCapsule from "./components/TopCapsule";
+import ToastHost from "./components/ToastHost";
 import ClipboardPrompt from "./components/ClipboardPrompt";
 import UpdateBanner from "./components/UpdateBanner";
 import OnboardingPage from "./pages/OnboardingPage";
@@ -13,6 +14,7 @@ import SettingsPage from "./pages/SettingsPage";
 import { themeModeFromValue, useTheme } from "./hooks/useTheme";
 import { useAppearanceSaver } from "./hooks/useAppearance";
 import { useUpdate } from "./hooks/useUpdate";
+import { useDownloads } from "./hooks/useDownloads";
 import { ipc, onClipboardShare, onSettingsUpdated, type ClipboardShareEvent, type Settings } from "./lib/ipc";
 import type { TabId } from "./lib/tabs";
 
@@ -43,6 +45,8 @@ export default function App() {
   // 剪贴板命中的分享链接提示（null = 不显示）
   const [clipShare, setClipShare] = useState<ClipboardShareEvent | null>(null);
   const updater = useUpdate();
+  // 下载任务全局 store：顶栏角标 + 完成失败自动 toast 的数据源（单例，多订阅者零增量 IPC）
+  const downloads = useDownloads();
   // 本次会话是否已忽略更新横幅（「稍后」后不再提醒）
   const [updateDismissed, setUpdateDismissed] = useState(false);
   // 外观保存队列（设置页 / 顶部胶囊共享）：串行写入 + 失败回滚
@@ -185,6 +189,7 @@ export default function App() {
             theme={effective}
             onToggleTheme={toggleThemePersist}
             hiddenTabs={showSearchTab ? [] : ["search"]}
+            downloadHint={{ count: downloads.activeCount, speed: downloads.totalSpeed }}
           />
         </div>
       </header>
@@ -227,6 +232,8 @@ export default function App() {
       {clipboardOn && clipShare && (
         <ClipboardPrompt share={clipShare} onResolve={goResolve} onDismiss={dismissClipShare} />
       )}
+      {/* 全局 Toast（下载完成/失败等即时反馈；aria-live 容器在组件内部） */}
+      <ToastHost />
     </div>
   );
 }

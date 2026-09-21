@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import ResolvePage from "./ResolvePage";
+import ToastHost from "../components/ToastHost";
 import type { ResolveSessionInfo, ShareFilePage } from "../lib/ipc";
 
 const { resolveShare, listShareFiles } = vi.hoisted(() => ({
@@ -14,7 +15,7 @@ vi.mock("../lib/ipc", () => ({
 
 describe("ResolvePage", () => {
   it("把手填提取码作为独立 IPC 参数发送", async () => {
-    render(<ResolvePage onNavigate={vi.fn()} />);
+    render(<><ResolvePage onNavigate={vi.fn()} /><ToastHost /></>);
     fireEvent.change(screen.getByPlaceholderText(/粘贴网盘分享链接/), { target: { value: "https://pan.quark.cn/s/abc" } });
     fireEvent.change(screen.getByPlaceholderText("提取码（可自动识别）"), { target: { value: "9xyz" } });
     fireEvent.click(screen.getByRole("button", { name: "解析" }));
@@ -26,7 +27,7 @@ describe("ResolvePage", () => {
     const child = { fid: "b", fname: "B.txt", fsize: 1, isdir: false, pdirFid: "a", fidToken: "", modifyTime: "" };
     resolveShare.mockResolvedValueOnce({ sessionKey: "session", platform: "quark", title: "根", files: [folder], hasMore: false });
     listShareFiles.mockResolvedValueOnce({ files: [child], hasMore: false });
-    render(<ResolvePage onNavigate={vi.fn()} />);
+    render(<><ResolvePage onNavigate={vi.fn()} /><ToastHost /></>);
     fireEvent.change(screen.getByPlaceholderText(/粘贴网盘分享链接/), { target: { value: "https://pan.quark.cn/s/abc" } });
     fireEvent.click(screen.getByRole("button", { name: "解析" }));
     await screen.findByText("已解析：根");

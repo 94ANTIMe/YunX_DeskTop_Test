@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPage from "./SettingsPage";
+import ToastHost from "../components/ToastHost";
 import { DEFAULT_SETTINGS, type Settings as SettingsT, type UpdateSettingsResult } from "../lib/ipc";
 import { COLOR_THEMES } from "../lib/themes";
 
@@ -27,11 +28,14 @@ vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn(() => Promise.resolv
 function renderPage(overrides?: { colorTheme?: string }) {
   const onAppearanceChange = vi.fn();
   render(
-    <SettingsPage
-      themeMode="system"
-      colorTheme={overrides?.colorTheme ?? "warm-editorial"}
-      onAppearanceChange={onAppearanceChange}
-    />,
+    <>
+      <SettingsPage
+        themeMode="system"
+        colorTheme={overrides?.colorTheme ?? "warm-editorial"}
+        onAppearanceChange={onAppearanceChange}
+      />
+      <ToastHost />
+    </>,
   );
   return { onAppearanceChange };
 }

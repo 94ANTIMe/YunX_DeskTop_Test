@@ -1,5 +1,6 @@
 import { Moon, Sun } from "lucide-react";
 import { TABS, type TabId } from "../lib/tabs";
+import { formatSpeed } from "../lib/format";
 
 interface TopCapsuleProps {
   current: TabId;
@@ -8,11 +9,14 @@ interface TopCapsuleProps {
   onToggleTheme: () => void;
   /** 隐藏的 Tab（如搜索 Tab 默认隐藏，设置开启后显示） */
   hiddenTabs?: TabId[];
+  /** 下载进行中提示（useDownloads store 派生）：count = 排队+下载中任务数，speed = 下载中速度总和 */
+  downloadHint?: { count: number; speed: number };
 }
 
-/** 顶部居中悬浮胶囊：品牌字 + Tab 胶囊导航 + 主题切换（取代原左侧 SideNav） */
-export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hiddenTabs }: TopCapsuleProps) {
+/** 顶部居中悬浮胶囊：品牌字 + Tab 胶囊导航 + 下载角标 + 主题切换（取代原左侧 SideNav） */
+export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hiddenTabs, downloadHint }: TopCapsuleProps) {
   const visible = TABS.filter((t) => !hiddenTabs?.includes(t.id));
+  const downloadBusy = (downloadHint?.count ?? 0) > 0;
   return (
     <nav
       aria-label="主导航"
@@ -33,11 +37,13 @@ export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hi
       {visible.map((tab) => {
         const Icon = tab.icon;
         const active = current === tab.id;
+        const showDownload = tab.id === "download" && downloadBusy;
         return (
           <button
             key={tab.id}
             onClick={() => onSelect(tab.id)}
             aria-current={active ? "page" : undefined}
+            aria-label={showDownload ? `${tab.label}，${downloadHint!.count} 个任务进行中` : undefined}
             className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-colors ${
               active
                 ? "bg-clay text-on-accent"
@@ -46,6 +52,23 @@ export default function TopCapsule({ current, onSelect, theme, onToggleTheme, hi
           >
             <Icon size={16} strokeWidth={active ? 2.2 : 1.8} />
             {tab.label}
+            {/* 下载角标 + 速度小字（非聚焦 span，语义由按钮 aria-label 承载） */}
+            {showDownload && (
+              <>
+                <span
+                  className={`rounded-full px-1.5 font-mono text-[10px] font-semibold leading-4 ${
+                    active ? "bg-on-accent/20 text-on-accent" : "bg-clay text-on-accent"
+                  }`}
+                >
+                  {downloadHint!.count}
+                </span>
+                {downloadHint!.speed > 0 && (
+                  <span className={`font-mono text-[10px] ${active ? "text-on-accent/80" : "text-clay-deep"}`}>
+                    {formatSpeed(downloadHint!.speed)}
+                  </span>
+                )}
+              </>
+            )}
           </button>
         );
       })}

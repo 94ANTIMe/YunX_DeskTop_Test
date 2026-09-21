@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Bell, Link2, Loader2, Plus, RefreshCw, Rss, Search as SearchIcon, Trash2, X } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import EmptyState from "../components/EmptyState";
 import { errMsg, ipc, DEFAULT_SETTINGS, type SearchItem, type Settings, type Subscription } from "../lib/ipc";
+import { toast } from "../lib/toast";
 import { platformLabel } from "../lib/format";
 import searchHero from "../assets/art/search-hero.jpg";
 
@@ -40,7 +41,6 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
   const [searching, setSearching] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
 
   // 订阅
   const [subs, setSubs] = useState<Subscription[]>([]);
@@ -69,13 +69,12 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
     if (!keyword || searching) return;
     setSearching(true);
     setError("");
-    setNotice("");
     try {
       const items = await ipc.pansouSearch(keyword);
       setResults(items);
-      if (items.length === 0) setNotice("未搜索到结果（换个关键词试试）");
+      if (items.length === 0) toast.info("未搜索到结果（换个关键词试试）");
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setSearching(false);
     }
@@ -85,13 +84,6 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
     onGoResolve(item.url, item.password);
   }
 
-  // 先清掉上一个定时器：连续操作时旧提示不得提前清掉新提示
-  const noticeTimer = useRef<number | undefined>(undefined);
-  function flashNotice(text: string) {
-    setNotice(text);
-    window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(""), 4000);
-  }
 
   // ---------- 订阅操作 ----------
 
@@ -115,9 +107,9 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
       const rows = await ipc.listSubscriptions();
       setSubs(rows);
       setSubsOpen(true);
-      flashNotice(`已订阅「${keyword}」，将按设置间隔定时检查更新`);
+      toast.success(`已订阅「${keyword}」，将按设置间隔定时检查更新`);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setSubSubmitting(false);
     }
@@ -135,7 +127,7 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
       const rows = await ipc.listSubscriptions();
       setSubs(rows);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -144,7 +136,7 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
       await ipc.removeSubscription(id);
       setSubs((rows) => rows.filter((r) => r.id !== id));
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     }
   }
 
@@ -154,11 +146,11 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
     setError("");
     try {
       const summary = await ipc.runSubscriptionNow(sub.id);
-      flashNotice(`「${sub.keyword}」${summary}`);
+      toast.success(`「${sub.keyword}」${summary}`);
       const rows = await ipc.listSubscriptions();
       setSubs(rows);
     } catch (e) {
-      setError(errMsg(e));
+      toast.error(errMsg(e));
     } finally {
       setSubBusy(null);
     }
@@ -311,9 +303,6 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
       {/* 提示条 */}
       {error && (
         <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
-      )}
-      {notice && (
-        <div className="rounded-ctrl bg-success/10 px-4 py-2.5 text-sm text-ink">{notice}</div>
       )}
 
       {/* 结果区 */}
