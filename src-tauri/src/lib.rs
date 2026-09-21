@@ -4,6 +4,7 @@ mod baidupcs;
 pub mod cli;
 mod clipboard;
 mod commands;
+mod credentials;
 mod crypto;
 mod db;
 mod error;

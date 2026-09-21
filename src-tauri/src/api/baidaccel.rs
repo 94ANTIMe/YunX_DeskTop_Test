@@ -293,7 +293,7 @@ pub async fn refresh_password(state: &AppState) -> AppResult<String> {
         .await;
     state.log(logger::INFO, "baidu", "accel", "解析码失效，开始自动更新", "");
 
-    let cookie = crate::resolve::load_account_cookie(
+    let cookie = crate::credentials::load_account_cookie(
         state,
         crate::models::Platform::Baidu,
         "自动更新解析码需先登录百度网盘",
@@ -301,7 +301,7 @@ pub async fn refresh_password(state: &AppState) -> AppResult<String> {
 
     // 1. 验证官方工具分享 + 定位更新包（根目录 + 一级子目录）
     let share = crate::api::baidu::verify_share_pcs(&state.http, PWD_SHARE_SURL, PWD_SHARE_PWD, &cookie).await.map_err(|e| {
-        crate::resolve::captcha_hint(e, "解析码自动获取失败（触发百度风控），可在 设置 → 百度网盘加速 中手动填写解析码")
+        crate::api::baidu::captcha_hint(e, "解析码自动获取失败（触发百度风控），可在 设置 → 百度网盘加速 中手动填写解析码")
     })?;
     let root = crate::api::baidu::list_share(&state.http, PWD_SHARE_SURL, &share.randsk, "/", &cookie, 1).await?;
     let mut candidate: Option<String> = None; // fs_id

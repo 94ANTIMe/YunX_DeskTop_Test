@@ -23,7 +23,8 @@
 - 验收：每步 `cargo test`（27）+ `pnpm test`（56）+ `cargo check` 全绿、独立 commit、断点刷新；全程行为零变化（IPC 字段、DB 结构、UI 行为不变）。
 - 基线 commit：`6431a18`（B 线完成点）。
 - 已完成：C1 ADR-0007 入档（决策与取舍，规范性 architecture.md 修订随各步落地——按「新规范先落地再写进规范」规则拆分执行）。
-- 当前计划：C2 斩环（credentials.rs 下沉）→ C3 → C4 → C5 → C6 → C7。
+- 已完成（C2 斩环，2026-09-22）：新增 `src-tauri/src/credentials.rs`（`load_account_cookie` 从 resolve 下沉，含「刚登录未落库」窗口期语义注释）；`quark_fetch_ctx` 移入 `api/quark.rs`（夸克域逻辑归 api）；`is_captcha_blocked`/`captcha_hint` 移入 `api/baidu.rs`（百度域错误映射归 api）；`api/pan_files.rs`、`api/baidaccel.rs` 全部改引 credentials/baidu/quark——api 层对 resolve 的引用清零（grep 验证），api→resolve 单向依赖成立。验证：`cargo test` 27/27、`cargo check` 0 警告、`pnpm test` 56/56。
+- 当前计划：C3 api 公共层（quark/uc refresh_session 合并、公共轮询 helper、错误映射归一）→ C4 PanPlatform trait 逐平台迁移（quark 先行）→ C5 aria2.rs 拆分 → C6 models/ipc 分域 → C7 前端收尾。
 - 不改：行为与语义（纯结构重构）、IPC 契约、DB 结构、版本号；不 push。
 - 若用户真机复测打回夸克修复：插一个小型 Rust 修复批次（单独 commit），再继续 C 线。
 - 提交均为本地 commit（`e7ca036`…`30eaaf5` 及文档提交），**未 push**；不升版本号。

@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{DownloadLink, Platform, ShareFile};
-use crate::resolve::load_account_cookie;
+use crate::credentials::load_account_cookie;
 use crate::state::AppState;
 
 /// 列表指定网盘个人存储目录下文件与子目录
@@ -197,7 +197,7 @@ pub async fn get_personal_download_link(
                 platform: "quark".into(),
                 cleanup_id: String::new(),
                 mirrors: Vec::new(),
-                fetch_ctx: crate::resolve::quark_fetch_ctx(&file.fid),
+                fetch_ctx: crate::api::quark::quark_fetch_ctx(&file.fid),
             })
         }
         Platform::Pan123 => {

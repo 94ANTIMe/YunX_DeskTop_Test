@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::api::{baidaccel, baidu, c139, pan123, quark, uc, xunlei};
 use crate::db::accounts::{self, Account};
 use crate::error::{AppError, AppResult};
+use crate::api::baidu::is_captcha_blocked;
+use crate::credentials::load_account_cookie;
 use crate::logger;
 use crate::models::{
     CollectedFile, DownloadLink, Platform, ResolveSessionInfo, ShareFile, ShareFilePage,
@@ -115,14 +117,6 @@ impl ResolveSessions {
 /// （登录 WebView 每 2s 轮询 Cookie 并异步验证后才写库，期间解析/取链读不到账号行）
 const QUARK_LOGIN_HINT: &str = "未检测到夸克登录态：刚完成登录请等几秒重试，否则请先登录夸克网盘";
 
-pub(crate) fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
-    let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-    let active = state.active_account_key(&platform);
-    match accounts::load(&conn, platform, &active)? {
-        Some(acc) if !acc.cookie().is_empty() => Ok(acc.cookie().to_string()),
-        _ => Err(AppError::Api(need_login_msg.to_string())),
-    }
-}
 
 fn insert_session(state: &AppState, session: ResolveSession) -> String {
     let key = Uuid::new_v4().to_string();
@@ -182,12 +176,6 @@ async fn quark_transfer_route(
     Ok((url, size, sub_dir, download_cookie, new_fid))
 }
 
-/// 夸克取链上下文：转存路线存新转存文件 fid，直取/个人文件路线存原 fid。
-/// 恢复 / 失败重试时按它重新取链（直链与 __puus 都有时效）。
-pub(crate) fn quark_fetch_ctx(fid: &str) -> String {
-    serde_json::json!({ "fid": fid }).to_string()
-}
-
 /// 解析取链上下文中的文件 fid（纯函数，测试锁定）
 fn parse_fetch_fid(ctx: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(ctx).ok()?;
@@ -221,27 +209,6 @@ pub(crate) async fn refresh_quark_download_link(
 }
 
 // ---------- 百度高速通道（百度分享加速路由） ----------
-
-/// 是否命中百度验证码风控（errno 105 等），用于给出明确提示并避免反复硬撞
-fn is_captcha_blocked(e: &AppError) -> bool {
-    match e {
-        AppError::Api(m) => {
-            let m = m.to_lowercase();
-            m.contains("105") || m.contains("验证码") || m.contains("captcha") || m.contains("needverify")
-        }
-        _ => false,
-    }
-}
-
-/// 验证码风控错误 → 明确指引；其余原样返回（供解析码刷新等链路使用）
-#[allow(dead_code)]
-pub(crate) fn captcha_hint(e: AppError, hint: &str) -> AppError {
-    if is_captcha_blocked(&e) {
-        AppError::Api(hint.to_string())
-    } else {
-        e
-    }
-}
 
 /// 百度官方接口错误 → 用户可读的明确提示（避免笼统的 errno 直出）
 /// - errno=2 参数错误：多为分享已失效/链接无效
@@ -757,7 +724,7 @@ pub async fn get_download_link(
                 platform: platform.key().to_string(),
                 cleanup_id,
                 mirrors: Vec::new(),
-                fetch_ctx: quark_fetch_ctx(&linked_fid),
+                fetch_ctx: crate::api::quark::quark_fetch_ctx(&linked_fid),
             })
         }
         Platform::Uc => {
@@ -995,7 +962,8 @@ pub async fn cleanup_baidu(state: &AppState, cleanup_path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_fetch_fid, quark_fetch_ctx, with_pwd_override, ResolveSession, ResolveSessions};
+    use super::{parse_fetch_fid, with_pwd_override, ResolveSession, ResolveSessions};
+    use crate::api::quark::quark_fetch_ctx;
     use crate::models::{ParsedShare, Platform};
 
     #[test]

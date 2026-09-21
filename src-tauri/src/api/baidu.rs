@@ -336,3 +336,23 @@ pub async fn transfer(
 
 // 转存清理（删除临时文件）由 BaiduPCS-Go sidecar 的 rm 完成（见 baidupcs::remove）：
 // 网页版 filemanager 删除接口在账号风控态返回 errno=132，sidecar 的 PCS 通道不受影响（实测 2026-09）。
+
+/// 是否命中百度验证码风控（errno 105 等），用于给出明确提示并避免反复硬撞
+pub(crate) fn is_captcha_blocked(e: &AppError) -> bool {
+    match e {
+        AppError::Api(m) => {
+            let m = m.to_lowercase();
+            m.contains("105") || m.contains("验证码") || m.contains("captcha") || m.contains("needverify")
+        }
+        _ => false,
+    }
+}
+
+/// 验证码风控错误 → 明确指引；其余原样返回（供解析码刷新等链路使用）
+pub(crate) fn captcha_hint(e: AppError, hint: &str) -> AppError {
+    if is_captcha_blocked(&e) {
+        AppError::Api(hint.to_string())
+    } else {
+        e
+    }
+}

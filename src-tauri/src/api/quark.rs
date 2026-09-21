@@ -274,6 +274,12 @@ pub async fn save_share_file(
     Ok(task_id)
 }
 
+/// 夸克取链上下文：转存路线存新转存文件 fid，直取/个人文件路线存原 fid。
+/// 恢复 / 失败重试时按它重新取链（直链与 __puus 都有时效）。
+pub fn quark_fetch_ctx(fid: &str) -> String {
+    serde_json::json!({ "fid": fid }).to_string()
+}
+
 /// 轮询响应非 200 的失败判定：连续 3 次非 200 视为接口报错（登录态失效 / 任务失败 / 限流），
 /// 组装带错误码与消息的失败信息；未达阈值返回 None（继续轮询容忍瞬时抖动）。
 fn poll_non_ok_failure(non_ok: u32, code: i64, message: &str) -> Option<String> {
