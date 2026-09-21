@@ -43,12 +43,22 @@
 
 ## 变更记录
 
+- **2026-09-21 · 独立 CLI 与 function-call 工具入口**：新增 `src-tauri/src/bin/yunx.rs` 与 `cli.rs`，支持解析、列文件、流式下载、脱敏日志和 OpenAI-compatible 工具定义；默认人类文本输出，工具入口稳定返回 JSON。CLI 每次命令内建立解析会话，不落盘平台令牌；不改变 Tauri IPC、桌面 aria2 生命周期和旧数据格式。相关 ADR-0006。
+
 - **2026-09-15 · 缺陷修复批次：引擎生命周期 / 交互竞态 / 任务列表一致性 / CI 注入面**：后端——aria2 引擎连接级失败触发互斥自愈重拉（5s 冷却，与 Unauthorized 自愈共用互斥），崩溃不再永久停摆；复用存活引擎时按 tellActive/tellWaiting 存活 gid 去重，不再重复 addUri 造成同文件二次下载；`.torrent` 任务种子字节落盘（`data_dir/torrents/{id}.torrent`），重启可断点恢复，副本随任务删除/清空清理；入队文件名净化（`sanitize_out_path`：剥 `..`/盘符分量、Windows 保留名、尾点尾空格，aria2 `out` 与本地删除原语共用）；`download_task` 终态 7 天自动清理 + `(status, finish_time)` 索引（消除每秒持锁全表扫描）；`list_tasks` 与事件快照窗口/排序对齐（消前端僵尸行）；节流进度落盘改单事务批量；完成后的转存清理与关机/睡眠动作移出轮询循环异步执行（不再阻塞全部任务进度事件）；托盘 tooltip ≥5s 节流；baidupcs stdin 写入纳入超时（防 RUN_LOCK 永久挂起）。前端——`useUpdate` 收敛为模块级单例（App 横幅与设置页卡片共享状态，修双实例重复下载与 check 失败死引用），下载进度 300ms 合帧；跨页解析请求在解析进行中改为排队续接（不再静默丢弃）；剪贴板提示 10s 自动消失；设置页滑杆键盘调整失焦落盘；提示条定时器互踩修复（设置/搜索/网盘文件管理页）；跨盘搜同款 Enter 守卫 + 过期响应丢弃；进度条 width% 改 `transform: scaleX()` 合成层动画；日志页内容无变化跳过 setState；滑杆 `accent-[#d97757]` 改 `accent-clay`（UI 硬编码主题色清零）。CI——`release.yml` GitCode 上传改参数数组调用 curl 并校验上传 URL 域名，移除 `eval` 拼接（堵签名私钥失窃面）。兼容性：IPC 契约（`ipc.ts` ↔ `models.rs`）零字段变化；`download_task` 仅新增幂等索引，旧库迁移不受影响；`list_tasks` 展示窗口收窄为「进行中 + 24h 内终态」（与事件流一致，超窗记录本就不在事件里）。相关时间轴「缺陷修复批次」。
 - **2026-09-15 · 引入接手文档与断点协议**：新建 `docs/Handed-docs.md` 作为唯一当前记录（🔴 断点区 + 只追加时间轴）；AGENTS.md 新增目录地图、接手文档协议（写方 / 读方 / 灾难恢复）、授权边界、沟通、事实与加载，硬性约束追加断点纪律（第 8 条）；workflow.md 变更流程前置第 0 步「接手与断点」；规范修订流程第 3 条为根入口协议开例外。兼容性：纯文档与流程变更，不涉及代码与数据。相关 ADR-0005。
 - **2026-09-07 · 更新体验与引擎同步报错修复**：`update_settings` 改为返回结构化结果（引擎同步失败不再作为错误抛出，前端改为非阻塞提示、不回滚）；aria2 RPC 先读文本再解析并对瞬时传输失败重试一次（根治「error decoding response body」误报）；更新横幅增加字节进度、失败时发布页兜底与重试、下载可取消、版本迁移展示；更新器新增 GitCode 回退源（CI 镜像改写 URL 后的 latest.json）。相关 ADR-0003 / ADR-0004。
 - **2026-09-07 · 多配色主题 + 致谢折叠 + 规范体系**：新增七套配色主题（`colorTheme` 设置，与明暗独立）；强调色按钮白字改为 `text-on-accent`；错误 / 成功 / 警告状态与强调色分离（`text-danger` / `text-success` / `text-warning`）；设置页外观区新增主题卡；开源致谢改原位折叠（默认收起）；外观保存走共享队列（`useAppearanceSaver`），后端对仅外观变更跳过 aria2；建立本规范目录。兼容性：旧 settings.json 缺 `colorTheme` 回退 `warm-editorial`，未知 ID 同样回退，其余设置不动。相关 ADR-0001 / ADR-0002。
 
 ## 决策记录
+
+### ADR-0006：独立 CLI 采用无状态工具调用与共享 AppState（2026-09-21）
+
+- **状态**：accepted
+- **背景**：需要让脚本、SSH 和本地 AI 调用云析，但 Tauri command 依赖 GUI 的 AppHandle，且解析会话包含平台令牌，不能简单跨进程复用或落盘。
+- **决策**：新增独立 `yunx` binary；CLI 在进程内创建 `AppState`，复用解析与日志模块；function call 使用 OpenAI-compatible 工具定义，输入携带分享链接，每次调用临时建立会话；CLI 下载先采用流式 HTTP，不改桌面 aria2。
+- **备选与取舍**：让 CLI 控制已运行桌面端（需本地服务、鉴权和端口协议，首版范围过大）；持久化 session key（会把平台令牌带入磁盘，放弃）；直接复刻解析逻辑（行为容易分叉，放弃）。
+- **影响**：新增 `pnpm cli` 开发命令和 `tools` / `tool` JSON 接口；CLI 当前跨命令不保留解析会话，下载首版要求文件位于解析首页列表；后续如需长任务进度，应单独设计本地守护进程或事件流协议。
 
 ### ADR-0001：主题 = 语义 token 注入而非 CSS 文件切换（2026-09-07）
 

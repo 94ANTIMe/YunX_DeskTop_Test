@@ -12,6 +12,7 @@ src/                       前端（React 19 + TypeScript + Tailwind v4）
   lib/                     与 UI 无关的纯逻辑：ipc.ts（IPC 封装 + 类型）、themes.ts（主题注册表）、format.ts、tabs.ts、download.ts
   styles/tokens.css        唯一的样式入口：语义 token 层 + @theme 别名 + 动效
 src-tauri/src/             后端（Rust）
+  cli.rs                    独立 CLI 与 function-call 工具入口（不依赖 GUI 窗口）
   commands/                Tauri command 层：参数校验、调用业务层、事件通知（薄）
   api/                     各网盘平台 API 封装（quark / uc / baidu / xunlei / pan123 / c139 / pansou …）
   db/                      SQLite（schema、账号存储）；业务表见 schema.rs
@@ -48,3 +49,4 @@ src-tauri/src/             后端（Rust）
 - **页面常驻**：App 不卸载页面（`hidden` 切换），因此页面内 state 天然「切页不丢」；隐藏页在 `memo` 下零 reconcile。新增页面必须维持这一约定或说明放弃原因。
 - **设置保存双队列**：SettingsPage 自身维护通用设置保存队列（单飞 + 失败回读回滚）；明暗 / 配色走 App 层 `useAppearanceSaver` 共享队列。两个队列都通过 `settings:updated` 事件与后端对账。
 - **下载引擎**：所有 aria2 交互收敛在 `aria2.rs`；设置里的引擎相关字段（限速 / 并发 / 代理）由 `update_settings` 同步，仅外观变更时跳过（`appearance_only`）。
+- **独立 CLI**：`src-tauri/src/bin/yunx.rs` 只负责进程入口；`cli.rs` 复用 `AppState`、解析编排和日志数据库。CLI 的 function-call 工具采用无状态 JSON 输入，不落盘解析会话或平台令牌；CLI 下载为流式 HTTP 下载，桌面端仍使用 aria2。

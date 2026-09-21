@@ -42,6 +42,27 @@
 
 在「设置」页填入自部署 PanSou 服务根地址（如 `https://so.252035.xyz`）或本地地址 `http://192.168.1.100:8888`，即可在「搜索」页启用聚合搜索；留空则关闭。
 
+## 🖥️ CLI 与 function call
+
+项目同时提供独立 Rust CLI，不需要启动桌面窗口，适合脚本、SSH 和本地 AI 工具调用：
+
+```bash
+pnpm cli -- help
+pnpm cli -- resolve "https://pan.example/s/xxx" --json
+pnpm cli -- files "https://pan.example/s/xxx" --json
+pnpm cli -- logs --limit 100 --json
+```
+
+function call 使用 OpenAI-compatible 的工具定义格式，可先查看工具清单，再通过 JSON 调用：
+
+```bash
+pnpm cli -- tools
+pnpm cli -- tool get_logs --input '{"limit":20}'
+pnpm cli -- tool resolve_share --input '{"url":"https://pan.example/s/xxx"}'
+```
+
+首版工具包括 `resolve_share`、`list_files`、`download_file` 和 `get_logs`。日志对 Cookie、Authorization、Token、密码等敏感值做脱敏；CLI 每次命令内建立解析会话，不会把平台令牌写入磁盘。CLI 下载使用流式 HTTP 下载，桌面端原有 aria2 下载流程不变。
+
 ## 📐 项目规范
 
 面向开发者与 AI 的统一规范入口：[AGENTS.md](AGENTS.md)（必读入口与规范地图）、[CONTRIBUTING.md](CONTRIBUTING.md)（开发流程），详细规范见 [docs/project/](docs/project/)（架构 / 变更流程 / 接口兼容 / 主题扩展 / 异步资源 / 测试 / 发布 / 决策记录）。

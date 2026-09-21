@@ -1,6 +1,7 @@
 mod api;
 mod aria2;
 mod baidupcs;
+pub mod cli;
 mod clipboard;
 mod commands;
 mod crypto;
