@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Pause, Play, Trash2 } from "lucide-react";
 import type { DownloadTask } from "../lib/ipc";
 import { formatSpeed } from "../lib/format";
+import { STATUS_COMPLETED, STATUS_DOWNLOADING, STATUS_FAILED, STATUS_PENDING } from "../lib/download-status";
 
 interface DownloadSummaryProps {
   tasks: DownloadTask[];
@@ -14,10 +15,10 @@ interface DownloadSummaryProps {
 export default function DownloadSummary({ tasks, onPauseAll, onResumeAll, onClearAll }: DownloadSummaryProps) {
   // 统计 memo 化：tasks 引用不变时跳过 200 行 × 5 次遍历重算
   const { active, pending, done, failed, totalSpeed } = useMemo(() => {
-    const active = tasks.filter((t) => t.status === 1);
-    const pending = tasks.filter((t) => t.status === 0);
-    const done = tasks.filter((t) => t.status === 3);
-    const failed = tasks.filter((t) => t.status === 4);
+    const active = tasks.filter((t) => t.status === STATUS_DOWNLOADING);
+    const pending = tasks.filter((t) => t.status === STATUS_PENDING);
+    const done = tasks.filter((t) => t.status === STATUS_COMPLETED);
+    const failed = tasks.filter((t) => t.status === STATUS_FAILED);
     const totalSpeed = active.reduce((s, t) => s + t.speed, 0);
     return { active, pending, done, failed, totalSpeed };
   }, [tasks]);

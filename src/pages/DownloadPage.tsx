@@ -20,6 +20,14 @@ import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { errMsg, ipc, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatRemain, formatSpeed, platformLabel } from "../lib/format";
 import { clearLocalTasks, forgetTask, getSpeedHistory, useDownloadsState } from "../hooks/useDownloads";
+import {
+  statusText,
+  STATUS_COMPLETED,
+  STATUS_DOWNLOADING,
+  STATUS_FAILED,
+  STATUS_PAUSED,
+  STATUS_PENDING,
+} from "../lib/download-status";
 import Skeleton from "../components/ui/Skeleton";
 import type { TabId } from "../lib/tabs";
 import emptyArt from "../assets/art/empty-downloads.jpg";
@@ -31,14 +39,6 @@ interface DownloadPageProps {
   onGoResolve?: (url: string, pwd?: string) => void;
 }
 
-/** 任务状态语义 */
-const STATUS_TEXT: Record<number, string> = {
-  0: "排队中",
-  1: "下载中",
-  2: "已暂停",
-  3: "已完成",
-  4: "失败",
-};
 
 interface TaskCardProps {
   task: DownloadTask;
@@ -64,8 +64,8 @@ const TaskCard = memo(function TaskCard({
     task.totalSize > 0
       ? Math.min(100, Math.round((task.downloadedSize / task.totalSize) * 100))
       : 0;
-  const done = task.status === 3;
-  const failed = task.status === 4;
+  const done = task.status === STATUS_COMPLETED;
+  const failed = task.status === STATUS_FAILED;
   return (
     <section
       onClick={() => onOpen(task.id)}
@@ -74,7 +74,7 @@ const TaskCard = memo(function TaskCard({
     >
       <div className="flex items-center gap-3">
         {/* 状态图标 */}
-        {task.status === 1 ? (
+        {task.status === STATUS_DOWNLOADING ? (
           <Loader2 size={18} className="shrink-0 animate-spin text-clay" />
         ) : done ? (
           <CheckCircle2 size={18} className="shrink-0 text-success" />
@@ -92,17 +92,17 @@ const TaskCard = memo(function TaskCard({
               {platformLabel(task.platform)}
             </span>
             <span className={done ? "text-success" : failed ? "text-danger" : ""}>
-              {STATUS_TEXT[task.status] ?? "未知"}
+              {statusText(task.status)}
             </span>
             {task.totalSize > 0 && (
               <span className="font-mono">
                 {formatBytes(task.downloadedSize)} / {formatBytes(task.totalSize)}
               </span>
             )}
-            {task.status === 1 && task.speed > 0 && (
+            {task.status === STATUS_DOWNLOADING && task.speed > 0 && (
               <span className="font-mono text-clay-deep">{formatSpeed(task.speed)}</span>
             )}
-            {task.status === 1 && task.totalSize > 0 && task.speed > 0 && (
+            {task.status === STATUS_DOWNLOADING && task.totalSize > 0 && task.speed > 0 && (
               <span>剩余 {formatRemain(task.totalSize, task.downloadedSize, task.speed)}</span>
             )}
             {failed && task.errorMsg && (
@@ -127,7 +127,7 @@ const TaskCard = memo(function TaskCard({
               打开位置
             </button>
           )}
-          {(task.status === 1 || task.status === 0) && (
+          {(task.status === STATUS_DOWNLOADING || task.status === STATUS_PENDING) && (
             <button
               onClick={() => onPause(task.id)}
               disabled={busy}
@@ -138,7 +138,7 @@ const TaskCard = memo(function TaskCard({
               暂停
             </button>
           )}
-          {(task.status === 2 || task.status === 4) && (
+          {(task.status === STATUS_PAUSED || task.status === STATUS_FAILED) && (
             <button
               onClick={() => onResume(task.id)}
               disabled={busy}
@@ -188,7 +188,7 @@ const TaskCard = memo(function TaskCard({
           <div className="h-full w-full rounded-full bg-success" />
         </div>
       )}
-      {task.status === 0 && pct === 0 && (
+      {task.status === STATUS_PENDING && pct === 0 && (
         <p className="mt-2 text-[11px] text-ink-soft/70">等待空闲下载位…</p>
       )}
     </section>

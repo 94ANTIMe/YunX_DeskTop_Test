@@ -1,6 +1,13 @@
 import { useSyncExternalStore } from "react";
 import { ipc, onDownloadsUpdated, type DownloadTask } from "../lib/ipc";
 import { toast } from "../lib/toast";
+import {
+  STATUS_COMPLETED,
+  STATUS_DOWNLOADING,
+  STATUS_FAILED,
+  STATUS_PAUSED,
+  STATUS_PENDING,
+} from "../lib/download-status";
 
 /**
  * 下载任务全局单例 store（useUpdate 同款模块级模式）：事件订阅、合并去重、速度采样、
@@ -28,8 +35,8 @@ function derive(tasks: DownloadTask[]): DownloadsState {
   let activeCount = 0;
   let totalSpeed = 0;
   for (const t of tasks) {
-    if (t.status === 0 || t.status === 1 || t.status === 2) activeCount++;
-    if (t.status === 1) totalSpeed += t.speed;
+    if (t.status === STATUS_PENDING || t.status === STATUS_DOWNLOADING || t.status === STATUS_PAUSED) activeCount++;
+    if (t.status === STATUS_DOWNLOADING) totalSpeed += t.speed;
   }
   return { tasks, loaded: state.loaded, activeCount, totalSpeed };
 }
@@ -117,14 +124,14 @@ export function getSpeedHistory(id: number): number[] {
 // ---------- 终态迁移检测：完成 / 失败自动 toast ----------
 
 function detectTransitions(prevTasks: DownloadTask[], updated: DownloadTask[]) {
-  if (!state.loaded) return; // 首次全量不提示（存量终态不算新鲜事）
-  const prevStatus = new Map(prevTasks.map((t) => [t.id, t.status]));
-  for (const t of updated) {
-    const prev = prevStatus.get(t.id);
-    if (prev === undefined || prev === t.status) continue;
-    if (t.status === 3) {
+    if (!state.loaded) return; // 首次全量不提示（存量终态不算新鲜事）
+    const prevStatus = new Map(prevTasks.map((t) => [t.id, t.status]));
+    for (const t of updated) {
+      const prev = prevStatus.get(t.id);
+      if (prev === undefined || prev === t.status) continue;
+    if (t.status === STATUS_COMPLETED) {
       toast.success(`下载完成：${t.fileName}`);
-    } else if (t.status === 4) {
+    } else if (t.status === STATUS_FAILED) {
       toast.error(t.errorMsg ? `下载失败：${t.fileName}（${t.errorMsg}）` : `下载失败：${t.fileName}`);
     }
   }

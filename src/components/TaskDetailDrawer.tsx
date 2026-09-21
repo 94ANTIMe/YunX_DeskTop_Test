@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { ipc, type DownloadDetail, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatDate, formatRemain, formatSpeed, platformLabel } from "../lib/format";
+import { statusText } from "../lib/download-status";
 import Drawer from "./ui/Drawer";
 import Button from "./ui/Button";
 
@@ -19,14 +20,6 @@ interface TaskDetailDrawerProps {
   onClose: () => void;
 }
 
-/** 任务状态语义（与后端 DownloadTaskView 状态常量对齐） */
-const STATUS_TEXT: Record<number, string> = {
-  0: "排队中",
-  1: "下载中",
-  2: "已暂停",
-  3: "已完成",
-  4: "失败",
-};
 
 /** 环形进度 */
 function ProgressRing({ pct, failed }: { pct: number; failed: boolean }) {
@@ -186,7 +179,7 @@ export default function TaskDetailDrawer({ task, history, onClose }: TaskDetailD
                   ) : failed ? (
                     <XCircle size={12} />
                   ) : null}
-                  {STATUS_TEXT[t.status] ?? "未知"}
+                  {statusText(t.status)}
                 </span>
               </div>
               <p className="mt-1.5 break-all text-sm font-medium text-ink">{t.fileName}</p>
