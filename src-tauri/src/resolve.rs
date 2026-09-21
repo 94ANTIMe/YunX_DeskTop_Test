@@ -117,6 +117,534 @@ impl ResolveSessions {
 /// （登录 WebView 每 2s 轮询 Cookie 并异步验证后才写库，期间解析/取链读不到账号行）
 const QUARK_LOGIN_HINT: &str = "未检测到夸克登录态：刚完成登录请等几秒重试，否则请先登录夸克网盘";
 
+// ---------- 平台适配接口（ADR-0007 C4）：会话建立 / 目录列表 / 取直链按平台内聚 ----------
+
+/// 平台适配 trait。静态分发：调用处 `match platform` 每平台一行委托到具体实现
+/// （原生 async fn in trait，静态分发，无 async_trait 依赖、无 dyn）。
+/// 新增平台 = 在 api/<platform>.rs 落接口 + 本文件 impl 此 trait + 三处 match 各加一行。
+pub(crate) trait PanPlatform {
+    /// 解析分享：校验/建会话字段，返回首页文件与标题
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)>;
+
+    /// 列目录（翻页），返回 (文件, 是否还有更多)
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)>;
+
+    /// 取下载直链（必要时转存临时目录）
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink>;
+}
+
+/// 夸克平台适配（C4 试点：三段编排体自 match 分支原样迁入）
+struct QuarkPlatform;
+
+impl PanPlatform for QuarkPlatform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let platform = Platform::Quark;
+        let cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
+        let (stoken, title) = quark::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
+        session.stoken = stoken;
+        let (files, _) = quark::get_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
+        Ok((files, title))
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        let cookie = load_account_cookie(state, Platform::Quark, QUARK_LOGIN_HINT)?;
+        let (files, _) = quark::get_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
+        let has_more = files.len() >= 100;
+        Ok((files, has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Quark;
+        let mut cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
+        // 取链前刷新 __puus（修复 AlistGo/alist#830 下载 412）
+        if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
+            if refreshed != cookie {
+                persist_cookie(state, platform, &refreshed, "");
+                cookie = refreshed;
+            }
+        }
+        // ① 转存路线（他人分享）：唯一子目录 tr_*（去重键每次不同，根治二次转存 404）
+        //    → 转存 → 轮询 → 取链 → cleanup = 子目录 fid（下载完成后删整个子目录）
+        // ② 直取路线（自己的分享，服务端拒绝转存自己的分享）：直接用分享 fid 取链
+        let (url, size, cleanup_id, download_cookie, linked_fid) = match quark_transfer_route(state, session, &cookie, file).await {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("禁止转存自己的分享") {
+                    state.log(crate::logger::INFO, "quark", "link", "自己的分享，跳过转存直接取链", &file.fname);
+                    let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
+                    (url, size, String::new(), download_cookie, file.fid.clone())
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: if file.fsize > 0 { file.fsize } else { size },
+            headers: vec![
+                ("Cookie".into(), download_cookie),
+                ("User-Agent".into(), quark::UA.into()),
+                ("Referer".into(), quark::DOWNLOAD_REFERER.into()),
+            ],
+            platform: platform.key().to_string(),
+            cleanup_id,
+            mirrors: Vec::new(),
+            fetch_ctx: crate::api::quark::quark_fetch_ctx(&linked_fid),
+        })
+    }
+}
+
+/// UC 平台适配
+struct UcPlatform;
+
+impl PanPlatform for UcPlatform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let platform = Platform::Uc;
+        let cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
+        let (stoken, title) = uc::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
+        session.stoken = stoken;
+        let files = uc::get_transfer_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
+        Ok((files, title))
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        let cookie = load_account_cookie(state, Platform::Uc, "请先登录 UC 网盘")?;
+        let files = uc::get_transfer_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
+        let has_more = files.len() >= 100;
+        Ok((files, has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Uc;
+        let mut cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
+        if let Ok(refreshed) = uc::refresh_session(&state.http, &cookie).await {
+            if refreshed != cookie {
+                persist_cookie(state, platform, &refreshed, "");
+                cookie = refreshed;
+            }
+        }
+        let (url, _, size) = uc::get_share_download_link(
+            &state.http, &file.fid, &file.fid_token, &session.stoken, &session.share_id, &cookie,
+        )
+        .await?;
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: if file.fsize > 0 { file.fsize } else { size },
+            headers: vec![
+                ("Cookie".into(), cookie),
+                ("User-Agent".into(), uc::UA.into()),
+                ("Referer".into(), uc::DOWNLOAD_REFERER.into()),
+            ],
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
+/// 139 平台适配
+struct C139Platform;
+
+impl PanPlatform for C139Platform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let platform = Platform::C139;
+        // 139 官方会明文回吐提取码，自动填充
+        if session.pwd.is_empty() {
+            if let Ok(pwd) = c139::get_out_link_password(&state.http, &parsed.share_id).await {
+                session.pwd = pwd;
+            }
+        }
+        let title = c139::get_out_link_title(&state.http, &parsed.share_id).await?;
+        let files = c139::get_share_files(&state.http, &parsed.share_id, "root", &session.pwd, 1, 200).await?;
+        // 登录态预取（下载需要）
+        if let Ok(cookie) = load_account_cookie(state, platform, "") {
+            if let Some(auth) = c139::extract_authorization(&cookie) {
+                session.authorization = auth;
+                session.account = c139::extract_account_full(&cookie).unwrap_or_default();
+            }
+        }
+        Ok((files, title))
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        let begin = (page - 1).max(0) * 200 + 1;
+        let end = page * 200;
+        let files = c139::get_share_files(&state.http, &session.share_id, dir_id, &session.pwd, begin, end).await?;
+        let has_more = files.len() >= 200;
+        Ok((files, has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::C139;
+        let (url, _, size) = c139::get_share_download_link(
+            &state.http, &file.fid, &session.share_id, &session.account, Some(&session.authorization),
+        )
+        .await?;
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: if file.fsize > 0 { file.fsize } else { size },
+            headers: vec![("User-Agent".into(), c139::SHARE_MOBILE_UA.to_string())],
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
+/// 123 云盘平台适配
+struct Pan123Platform;
+
+impl PanPlatform for Pan123Platform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let (files, next) = pan123::get_share_files(&state.http, &parsed.share_id, &session.pwd, "0", "", 1).await?;
+        session.next_cursor = next.clone().unwrap_or_default();
+        session.last_dir = "0".to_string();
+        Ok((files, String::new()))
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        // 目录切换 → 重置游标；翻页 → 用会话游标（last_dir 由调用方在本轮结束时回写，
+        // 此处读到的仍是上一轮目录，恰为 dir_changed 判定）
+        let dir_changed = session.last_dir != dir_id;
+        let next = if dir_changed || page <= 1 { String::new() } else { session.next_cursor.clone() };
+        let (files, next_cursor) = pan123::get_share_files(&state.http, &session.share_id, &session.pwd, dir_id, &next, 1).await?;
+        session.next_cursor = next_cursor.clone().unwrap_or_default();
+        let has_more = next_cursor.is_some();
+        Ok((files, has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Pan123;
+        let token = {
+            let conn = state.db.lock().map_err(|_| AppError::Lock)?;
+            let active = state.active_account_key(&platform);
+            match accounts::load(&conn, platform, &active)? {
+                Some(Account::Pan123 { access_token, .. }) if !access_token.is_empty() => access_token,
+                _ => return Err(AppError::Api("请先登录 123 云盘".into())),
+            }
+        };
+        let (url, _, size) = pan123::get_share_download_link(&state.http, &session.share_id, file, &token).await?;
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: if file.fsize > 0 { file.fsize } else { size },
+            headers: vec![
+                ("User-Agent".into(), pan123::DART_UA.into()),
+                ("Referer".into(), pan123::DOWNLOAD_REFERER.into()),
+            ],
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
+/// 迅雷平台适配
+struct XunleiPlatform;
+
+impl XunleiPlatform {
+    /// 取出克隆运行时（MutexGuard 不跨 await）；登录校验
+    fn clone_runtime(state: &AppState) -> AppResult<crate::api::xunlei::XunleiRuntime> {
+        let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
+        if guard.access_token.is_empty() {
+            return Err(AppError::Api("请先登录迅雷网盘".into()));
+        }
+        Ok(guard.clone())
+    }
+}
+
+impl PanPlatform for XunleiPlatform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        state.load_xunlei_runtime()?;
+        let mut rt = Self::clone_runtime(state)?;
+        let (title, files, pass_code_token, next) =
+            xunlei::get_share(&state.http, &mut rt, &parsed.share_id, &parsed.pwd, "").await?;
+        *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+        state.persist_xunlei_runtime("")?;
+        session.pass_code_token = pass_code_token;
+        session.next_page_token = next;
+        Ok((files, title))
+    }
+
+    async fn list_files(
+        &self,
+        state: &AppState,
+        session: &mut ResolveSession,
+        dir_id: &str,
+        _page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        let mut rt = Self::clone_runtime(state)?;
+        let (files, next) = xunlei::get_share_detail(&state.http, &mut rt, &session.share_id, dir_id, &session.pass_code_token, &session.next_page_token).await?;
+        *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+        session.next_page_token = next;
+        let has_more = files.len() >= 100;
+        Ok((files, has_more))
+    }
+
+    async fn fetch_link(
+        &self,
+        state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Xunlei;
+        state.load_xunlei_runtime()?;
+        let mut rt = Self::clone_runtime(state)?;
+        let temp_dir = xunlei::ensure_temp_dir(&state.http, &mut rt).await?;
+        let new_id = xunlei::restore(
+            &state.http, &mut rt, &session.share_id, &session.pass_code_token, &temp_dir, &[file.fid.clone()],
+        )
+        .await?;
+        let (url, _, size) = xunlei::get_file_detail(&state.http, &mut rt, &new_id).await?;
+        // 取链后即时清理（直链自带签名，删除不影响下载）
+        let _ = xunlei::batch_delete(&state.http, &mut rt, &[new_id]).await;
+        *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: if file.fsize > 0 { file.fsize } else { size },
+            headers: vec![("User-Agent".into(), xunlei::WEB_UA.into())],
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
+/// 直链平台适配（裸链接 / 磁力：无分享协议，列表恒空）
+struct DirectPlatform;
+
+impl PanPlatform for DirectPlatform {
+    async fn fill_session(
+        &self,
+        state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        _session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let url = parsed.share_id.clone();
+        let mut fname = url
+            .split('?')
+            .next()
+            .unwrap_or(&url)
+            .split('/')
+            .last()
+            .unwrap_or("download.bin")
+            .to_string();
+        if let Ok(decoded) = urlencoding::decode(&fname) {
+            fname = decoded.into_owned();
+        }
+        if fname.is_empty() {
+            fname = "download.bin".to_string();
+        }
+        let mut fsize = 0i64;
+        if let Ok(resp) = state.http.head(&url).timeout(std::time::Duration::from_secs(3)).send().await {
+            if let Some(len) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
+                if let Ok(s) = len.to_str() {
+                    fsize = s.parse::<i64>().unwrap_or(0);
+                }
+            }
+        }
+        let file = ShareFile {
+            fid: "direct".into(),
+            fname: fname.clone(),
+            fsize,
+            isdir: false,
+            pdir_fid: "".into(),
+            fid_token: url.clone(),
+            modify_time: "".into(),
+        };
+        Ok((vec![file], fname))
+    }
+
+    async fn list_files(
+        &self,
+        _state: &AppState,
+        _session: &mut ResolveSession,
+        _dir_id: &str,
+        _page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        Ok((Vec::new(), false))
+    }
+
+    async fn fetch_link(
+        &self,
+        _state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Direct;
+        let url = if !file.fid_token.is_empty() { file.fid_token.clone() } else { session.share_id.clone() };
+        Ok(DownloadLink {
+            url,
+            filename: file.fname.clone(),
+            size: file.fsize,
+            headers: vec![
+                ("User-Agent".into(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36".into()),
+            ],
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
+/// 磁力平台适配（magnet: 链接，无分享协议，列表恒空）
+struct MagnetPlatform;
+
+impl PanPlatform for MagnetPlatform {
+    async fn fill_session(
+        &self,
+        _state: &AppState,
+        parsed: &crate::models::ParsedShare,
+        _session: &mut ResolveSession,
+    ) -> AppResult<(Vec<ShareFile>, String)> {
+        let magnet = parsed.share_id.clone();
+        let fname = if let Some(dn_idx) = magnet.find("dn=") {
+            let after = &magnet[dn_idx + 3..];
+            let end = after.find('&').unwrap_or(after.len());
+            urlencoding::decode(&after[..end])
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| "Magnet_BT_Task".to_string())
+        } else {
+            "Magnet_BT_Task".to_string()
+        };
+        let file = ShareFile {
+            fid: "magnet".into(),
+            fname: fname.clone(),
+            fsize: 0,
+            isdir: false,
+            pdir_fid: "".into(),
+            fid_token: magnet.clone(),
+            modify_time: "".into(),
+        };
+        Ok((vec![file], fname))
+    }
+
+    async fn list_files(
+        &self,
+        _state: &AppState,
+        _session: &mut ResolveSession,
+        _dir_id: &str,
+        _page: i64,
+    ) -> AppResult<(Vec<ShareFile>, bool)> {
+        Ok((Vec::new(), false))
+    }
+
+    async fn fetch_link(
+        &self,
+        _state: &AppState,
+        session: &ResolveSession,
+        file: &ShareFile,
+    ) -> AppResult<DownloadLink> {
+        let platform = Platform::Magnet;
+        let magnet = if !file.fid_token.is_empty() { file.fid_token.clone() } else { session.share_id.clone() };
+        Ok(DownloadLink {
+            url: magnet,
+            filename: file.fname.clone(),
+            size: file.fsize,
+            headers: Vec::new(),
+            platform: platform.key().to_string(),
+            cleanup_id: String::new(),
+            mirrors: Vec::new(),
+            fetch_ctx: String::new(),
+        })
+    }
+}
+
 
 fn insert_session(state: &AppState, session: ResolveSession) -> String {
     let key = Uuid::new_v4().to_string();
@@ -420,20 +948,8 @@ async fn build_session(
     session: &mut ResolveSession,
 ) -> AppResult<(Vec<ShareFile>, String)> {
     let (files, title) = match platform {
-        Platform::Quark => {
-            let cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
-            let (stoken, title) = quark::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
-            session.stoken = stoken;
-            let (files, _) = quark::get_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
-            (files, title)
-        }
-        Platform::Uc => {
-            let cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
-            let (stoken, title) = uc::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
-            session.stoken = stoken;
-            let files = uc::get_transfer_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
-            (files, title)
-        }
+        Platform::Quark => QuarkPlatform.fill_session(state, parsed, session).await?,
+        Platform::Uc => UcPlatform.fill_session(state, parsed, session).await?,
         Platform::Baidu => {
             // 自动静默优先探测高速通道，不可用时毫秒级无感回退官方多镜像并发链路
             match accel_list(state, &parsed.share_id, &parsed.pwd, "/").await {
@@ -457,105 +973,11 @@ async fn build_session(
             }
             baidu_official_session(state, parsed, session).await?
         }
-        Platform::C139 => {
-            // 139 官方会明文回吐提取码，自动填充
-            if session.pwd.is_empty() {
-                if let Ok(pwd) = c139::get_out_link_password(&state.http, &parsed.share_id).await {
-                    session.pwd = pwd;
-                }
-            }
-            let title = c139::get_out_link_title(&state.http, &parsed.share_id).await?;
-            let files = c139::get_share_files(&state.http, &parsed.share_id, "root", &session.pwd, 1, 200).await?;
-            // 登录态预取（下载需要）
-            if let Ok(cookie) = load_account_cookie(state, platform, "") {
-                if let Some(auth) = c139::extract_authorization(&cookie) {
-                    session.authorization = auth;
-                    session.account = c139::extract_account_full(&cookie).unwrap_or_default();
-                }
-            }
-            (files, title)
-        }
-        Platform::Pan123 => {
-            let (files, next) = pan123::get_share_files(&state.http, &parsed.share_id, &session.pwd, "0", "", 1).await?;
-            session.next_cursor = next.clone().unwrap_or_default();
-            session.last_dir = "0".to_string();
-            (files, String::new())
-        }
-        Platform::Xunlei => {
-            state.load_xunlei_runtime()?;
-            // 克隆运行时（MutexGuard 不跨 await），完成后写回
-            let mut rt = {
-                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
-                if guard.access_token.is_empty() {
-                    return Err(AppError::Api("请先登录迅雷网盘".into()));
-                }
-                guard.clone()
-            };
-            let (title, files, pass_code_token, next) =
-                xunlei::get_share(&state.http, &mut rt, &parsed.share_id, &parsed.pwd, "").await?;
-            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
-            state.persist_xunlei_runtime("")?;
-            session.pass_code_token = pass_code_token;
-            session.next_page_token = next;
-            (files, title)
-        }
-        Platform::Direct => {
-            let url = parsed.share_id.clone();
-            let mut fname = url
-                .split('?')
-                .next()
-                .unwrap_or(&url)
-                .split('/')
-                .last()
-                .unwrap_or("download.bin")
-                .to_string();
-            if let Ok(decoded) = urlencoding::decode(&fname) {
-                fname = decoded.into_owned();
-            }
-            if fname.is_empty() {
-                fname = "download.bin".to_string();
-            }
-            let mut fsize = 0i64;
-            if let Ok(resp) = state.http.head(&url).timeout(std::time::Duration::from_secs(3)).send().await {
-                if let Some(len) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
-                    if let Ok(s) = len.to_str() {
-                        fsize = s.parse::<i64>().unwrap_or(0);
-                    }
-                }
-            }
-            let file = ShareFile {
-                fid: "direct".into(),
-                fname: fname.clone(),
-                fsize,
-                isdir: false,
-                pdir_fid: "".into(),
-                fid_token: url.clone(),
-                modify_time: "".into(),
-            };
-            (vec![file], fname)
-        }
-        Platform::Magnet => {
-            let magnet = parsed.share_id.clone();
-            let fname = if let Some(dn_idx) = magnet.find("dn=") {
-                let after = &magnet[dn_idx + 3..];
-                let end = after.find('&').unwrap_or(after.len());
-                urlencoding::decode(&after[..end])
-                    .map(|s| s.into_owned())
-                    .unwrap_or_else(|_| "Magnet_BT_Task".to_string())
-            } else {
-                "Magnet_BT_Task".to_string()
-            };
-            let file = ShareFile {
-                fid: "magnet".into(),
-                fname: fname.clone(),
-                fsize: 0,
-                isdir: false,
-                pdir_fid: "".into(),
-                fid_token: magnet.clone(),
-                modify_time: "".into(),
-            };
-            (vec![file], fname)
-        }
+        Platform::C139 => C139Platform.fill_session(state, parsed, session).await?,
+        Platform::Pan123 => Pan123Platform.fill_session(state, parsed, session).await?,
+        Platform::Xunlei => XunleiPlatform.fill_session(state, parsed, session).await?,
+        Platform::Direct => DirectPlatform.fill_session(state, parsed, session).await?,
+        Platform::Magnet => MagnetPlatform.fill_session(state, parsed, session).await?,
     };
     session.title = title.clone();
     Ok((files, title))
@@ -578,20 +1000,9 @@ pub async fn list_share_files(
 ) -> AppResult<ShareFilePage> {
     let mut session = get_session(state, session_key)?;
     let platform = session.platform;
-    let dir_changed = session.last_dir != dir_id;
     let (files, has_more) = match platform {
-        Platform::Quark => {
-            let cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
-            let (files, _) = quark::get_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
-            let has_more = files.len() >= 100;
-            (files, has_more)
-        }
-        Platform::Uc => {
-            let cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
-            let files = uc::get_transfer_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
-            let has_more = files.len() >= 100;
-            (files, has_more)
-        }
+        Platform::Quark => QuarkPlatform.list_files(state, &mut session, dir_id, page).await?,
+        Platform::Uc => UcPlatform.list_files(state, &mut session, dir_id, page).await?,
         Platform::Baidu if session.accel => {
             // 加速路由：dir_id 即分享内绝对路径；刷新后回写 randsk/uk/shareid
             let data = accel_list(state, &session.share_id, &session.pwd, dir_id).await?;
@@ -605,34 +1016,10 @@ pub async fn list_share_files(
             let list = baidu::list_share(&state.http, &session.share_id, &session.sekey, dir_id, &cookie, page).await?;
             (list.files, list.has_more)
         }
-        Platform::C139 => {
-            let begin = (page - 1).max(0) * 200 + 1;
-            let end = page * 200;
-            let files = c139::get_share_files(&state.http, &session.share_id, dir_id, &session.pwd, begin, end).await?;
-            let has_more = files.len() >= 200;
-            (files, has_more)
-        }
-        Platform::Pan123 => {
-            // 目录切换 → 重置游标；翻页 → 用会话游标
-            let next = if dir_changed || page <= 1 { String::new() } else { session.next_cursor.clone() };
-            let (files, next_cursor) = pan123::get_share_files(&state.http, &session.share_id, &session.pwd, dir_id, &next, 1).await?;
-            session.next_cursor = next_cursor.clone().unwrap_or_default();
-            let has_more = next_cursor.is_some();
-            (files, has_more)
-        }
-        Platform::Xunlei => {
-            let token = if dir_changed || page <= 1 { String::new() } else { session.next_page_token.clone() };
-            let mut rt = {
-                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
-                guard.clone()
-            };
-            let (files, next) = xunlei::get_share_detail(&state.http, &mut rt, &session.share_id, dir_id, &session.pass_code_token, &token).await?;
-            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
-            session.next_page_token = next;
-            let has_more = files.len() >= 100;
-            (files, has_more)
-        }
-        Platform::Direct | Platform::Magnet => (Vec::new(), false),
+        Platform::C139 => C139Platform.list_files(state, &mut session, dir_id, page).await?,
+        Platform::Pan123 => Pan123Platform.list_files(state, &mut session, dir_id, page).await?,
+        Platform::Xunlei => XunleiPlatform.list_files(state, &mut session, dir_id, page).await?,
+        Platform::Direct | Platform::Magnet => DirectPlatform.list_files(state, &mut session, dir_id, page).await?,
     };
     session.last_dir = dir_id.to_string();
     update_session(state, session_key, session);
@@ -685,75 +1072,9 @@ pub async fn get_download_link(
 ) -> AppResult<DownloadLink> {
     let session = get_session(state, session_key)?;
     let platform = session.platform;
-    let share_id = session.share_id.clone();
     match platform {
-        Platform::Quark => {
-            let mut cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
-            // 取链前刷新 __puus（修复 AlistGo/alist#830 下载 412）
-            if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
-                if refreshed != cookie {
-                    persist_cookie(state, platform, &refreshed, "");
-                    cookie = refreshed;
-                }
-            }
-            // ① 转存路线（他人分享）：唯一子目录 tr_*（去重键每次不同，根治二次转存 404）
-            //    → 转存 → 轮询 → 取链 → cleanup = 子目录 fid（下载完成后删整个子目录）
-            // ② 直取路线（自己的分享，服务端拒绝转存自己的分享）：直接用分享 fid 取链
-            let (url, size, cleanup_id, download_cookie, linked_fid) = match quark_transfer_route(state, &session, &cookie, file).await {
-                Ok(v) => v,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("禁止转存自己的分享") {
-                        state.log(crate::logger::INFO, "quark", "link", "自己的分享，跳过转存直接取链", &file.fname);
-                        let (url, _, size, download_cookie) = quark::get_download_link(&state.http, &file.fid, &cookie).await?;
-                        (url, size, String::new(), download_cookie, file.fid.clone())
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            Ok(DownloadLink {
-                url,
-                filename: file.fname.clone(),
-                size: if file.fsize > 0 { file.fsize } else { size },
-                headers: vec![
-                    ("Cookie".into(), download_cookie),
-                    ("User-Agent".into(), quark::UA.into()),
-                    ("Referer".into(), quark::DOWNLOAD_REFERER.into()),
-                ],
-                platform: platform.key().to_string(),
-                cleanup_id,
-                mirrors: Vec::new(),
-                fetch_ctx: crate::api::quark::quark_fetch_ctx(&linked_fid),
-            })
-        }
-        Platform::Uc => {
-            let mut cookie = load_account_cookie(state, platform, "请先登录 UC 网盘")?;
-            if let Ok(refreshed) = uc::refresh_session(&state.http, &cookie).await {
-                if refreshed != cookie {
-                    persist_cookie(state, platform, &refreshed, "");
-                    cookie = refreshed;
-                }
-            }
-            let (url, _, size) = uc::get_share_download_link(
-                &state.http, &file.fid, &file.fid_token, &session.stoken, &share_id, &cookie,
-            )
-            .await?;
-            Ok(DownloadLink {
-                url,
-                filename: file.fname.clone(),
-                size: if file.fsize > 0 { file.fsize } else { size },
-                headers: vec![
-                    ("Cookie".into(), cookie),
-                    ("User-Agent".into(), uc::UA.into()),
-                    ("Referer".into(), uc::DOWNLOAD_REFERER.into()),
-                ],
-                platform: platform.key().to_string(),
-                cleanup_id: String::new(),
-                mirrors: Vec::new(),
-                fetch_ctx: String::new(),
-            })
-        }
+        Platform::Quark => QuarkPlatform.fetch_link(state, &session, file).await,
+        Platform::Uc => UcPlatform.fetch_link(state, &session, file).await,
         Platform::Baidu if session.accel => {
             // 加速取链：列表已携带 dlink 时直接用（省每日额度），否则调 get_download_links；
             // 解析码失效（20016）自动刷新一次后重试；直链不可达时自动回退官方链路
@@ -830,75 +1151,9 @@ pub async fn get_download_link(
                 fetch_ctx: String::new(),
             })
         }
-        Platform::C139 => {
-            let (url, _, size) = c139::get_share_download_link(
-                &state.http, &file.fid, &share_id, &session.account, Some(&session.authorization),
-            )
-            .await?;
-            Ok(DownloadLink {
-                url,
-                filename: file.fname.clone(),
-                size: if file.fsize > 0 { file.fsize } else { size },
-                headers: vec![("User-Agent".into(), c139::SHARE_MOBILE_UA.to_string())],
-                platform: platform.key().to_string(),
-                cleanup_id: String::new(),
-                mirrors: Vec::new(),
-                fetch_ctx: String::new(),
-            })
-        }
-        Platform::Pan123 => {
-            let token = {
-                let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-                let active = state.active_account_key(&platform);
-                match accounts::load(&conn, platform, &active)? {
-                    Some(Account::Pan123 { access_token, .. }) if !access_token.is_empty() => access_token,
-                    _ => return Err(AppError::Api("请先登录 123 云盘".into())),
-                }
-            };
-            let (url, _, size) = pan123::get_share_download_link(&state.http, &share_id, file, &token).await?;
-            Ok(DownloadLink {
-                url,
-                filename: file.fname.clone(),
-                size: if file.fsize > 0 { file.fsize } else { size },
-                headers: vec![
-                    ("User-Agent".into(), pan123::DART_UA.into()),
-                    ("Referer".into(), pan123::DOWNLOAD_REFERER.into()),
-                ],
-                platform: platform.key().to_string(),
-                cleanup_id: String::new(),
-                mirrors: Vec::new(),
-                fetch_ctx: String::new(),
-            })
-        }
-        Platform::Xunlei => {
-            state.load_xunlei_runtime()?;
-            let mut rt = {
-                let guard = state.xunlei.lock().map_err(|_| AppError::Lock)?;
-                if guard.access_token.is_empty() {
-                    return Err(AppError::Api("请先登录迅雷网盘".into()));
-                }
-                guard.clone()
-            };
-            let temp_dir = xunlei::ensure_temp_dir(&state.http, &mut rt).await?;
-            let new_id = xunlei::restore(
-                &state.http, &mut rt, &share_id, &session.pass_code_token, &temp_dir, &[file.fid.clone()],
-            )
-            .await?;
-            let (url, _, size) = xunlei::get_file_detail(&state.http, &mut rt, &new_id).await?;
-            // 取链后即时清理（直链自带签名，删除不影响下载）
-            let _ = xunlei::batch_delete(&state.http, &mut rt, &[new_id]).await;
-            *state.xunlei.lock().map_err(|_| AppError::Lock)? = rt;
-            Ok(DownloadLink {
-                url,
-                filename: file.fname.clone(),
-                size: if file.fsize > 0 { file.fsize } else { size },
-                headers: vec![("User-Agent".into(), xunlei::WEB_UA.into())],
-                platform: platform.key().to_string(),
-                cleanup_id: String::new(),
-                mirrors: Vec::new(),
-                fetch_ctx: String::new(),
-            })
-        }
+        Platform::C139 => C139Platform.fetch_link(state, &session, file).await,
+        Platform::Pan123 => Pan123Platform.fetch_link(state, &session, file).await,
+        Platform::Xunlei => XunleiPlatform.fetch_link(state, &session, file).await,
         Platform::Direct => {
             let url = if !file.fid_token.is_empty() { file.fid_token.clone() } else { session.share_id.clone() };
             Ok(DownloadLink {
