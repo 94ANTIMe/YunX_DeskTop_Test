@@ -274,9 +274,23 @@ pub async fn save_share_file(
     Ok(task_id)
 }
 
+/// 轮询响应非 200 的失败判定：连续 3 次非 200 视为接口报错（登录态失效 / 任务失败 / 限流），
+/// 组装带错误码与消息的失败信息；未达阈值返回 None（继续轮询容忍瞬时抖动）。
+fn poll_non_ok_failure(non_ok: u32, code: i64, message: &str) -> Option<String> {
+    if non_ok < 3 {
+        return None;
+    }
+    Some(if message.is_empty() {
+        format!("转存任务轮询失败（code {code}）")
+    } else {
+        format!("转存任务轮询失败（code {code}）：{message}")
+    })
+}
+
 /// 轮询异步任务直到完成，返回转存后的新 fid（60 次 × 1s）
 pub async fn poll_task(client: &Client, task_id: &str, cookie: &str) -> AppResult<String> {
     let url = format!("{TASK_URL}&task_id={}&retry_index=0", urlencoding::encode(task_id));
+    let mut non_ok = 0u32;
     for _ in 0..TRANSFER_POLL_ATTEMPTS {
         let resp = client
             .get(&url)
@@ -286,6 +300,7 @@ pub async fn poll_task(client: &Client, task_id: &str, cookie: &str) -> AppResul
             .await?;
         let v: Value = resp.json().await?;
         if v.get("status").and_then(|s| s.as_i64()).unwrap_or(0) == 200 {
+            non_ok = 0;
             let data = v.get("data");
             if let Some(data) = data {
                 let finished = i64_or(data, "finished_at") > 0
@@ -300,6 +315,13 @@ pub async fn poll_task(client: &Client, task_id: &str, cookie: &str) -> AppResul
                         return Ok(fid.to_string());
                     }
                 }
+            }
+        } else {
+            non_ok += 1;
+            let code = v.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
+            let message = v.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            if let Some(err) = poll_non_ok_failure(non_ok, code, message) {
+                return Err(AppError::Api(err));
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -361,11 +383,28 @@ pub async fn delete_file(client: &Client, fid: &str, cookie: &str) -> AppResult<
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_download_cookie, TRANSFER_POLL_ATTEMPTS};
+    use super::{merge_download_cookie, poll_non_ok_failure, TRANSFER_POLL_ATTEMPTS};
 
     #[test]
     fn transfer_polling_allows_slow_quark_tasks() {
         assert_eq!(TRANSFER_POLL_ATTEMPTS, 60);
+    }
+
+    #[test]
+    fn poll_non_ok_aborts_with_code_and_message_after_three_failures() {
+        // 未达阈值：容忍瞬时抖动继续轮询
+        assert_eq!(poll_non_ok_failure(1, 401, "登录态失效"), None);
+        assert_eq!(poll_non_ok_failure(2, 401, "登录态失效"), None);
+        // 连续 3 次：带错误码与消息失败
+        assert_eq!(
+            poll_non_ok_failure(3, 401, "登录态失效").as_deref(),
+            Some("转存任务轮询失败（code 401）：登录态失效")
+        );
+        // 空消息：只带错误码
+        assert_eq!(
+            poll_non_ok_failure(4, 500, "").as_deref(),
+            Some("转存任务轮询失败（code 500）")
+        );
     }
 
     #[test]

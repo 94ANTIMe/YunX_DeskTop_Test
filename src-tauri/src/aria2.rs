@@ -257,6 +257,8 @@ fn is_connection_error(msg: &str) -> bool {
 static HEAL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 /// 重拉冷却：spawn 失败（依赖缺失等）时避免 poll_loop 每秒风暴式重拉
 static LAST_RESPAWN: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
+/// 重挂冷却：poll 检测到 gid 失联后避免连续重挂风暴
+static LAST_REMOUNT: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
 
 fn heal_lock() -> &'static tokio::sync::Mutex<()> {
     HEAL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -285,6 +287,37 @@ async fn respawn_engine(app: &AppHandle) -> bool {
     // netstat/tasklist/taskkill 是同步子进程，放 blocking 线程执行，避免冻结 tokio worker
     let _ = tokio::task::spawn_blocking(|| kill_stale_aria2_on_port(RPC_PORT)).await;
     spawn_sidecar(app).await
+}
+
+/// 引擎健康但活跃任务 gid 全部失联（引擎进程被换过）→ 复用启动恢复逻辑重挂。
+/// 不在 respawn_engine 里做：自愈发生在 rpc_call 内部，原地重挂会与原请求的重试 addUri
+/// 撞车造成同一任务双入队；poll 触发点没有在途 addUri，且复用 live gid 复检天然幂等。
+async fn remount_if_detached(app: &AppHandle, unknown_active: usize, active_total: usize) {
+    if active_total == 0 || unknown_active == 0 {
+        return;
+    }
+    if unknown_active < active_total {
+        return; // 个别失联可能是任务刚结束，全部失联才判定引擎换代
+    }
+    if rpc_call_raw("aria2.getVersion", vec![]).await.is_err() {
+        return; // 引擎不健康：交给 rpc_call 自愈，下一轮 poll 再触发
+    }
+    {
+        let cell = LAST_REMOUNT.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut last) = cell.lock() else {
+            return;
+        };
+        if let Some(t) = *last {
+            if t.elapsed() < std::time::Duration::from_secs(10) {
+                return;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    engine_log(app, "remount_if_detached: 活跃任务与引擎失联，自动重挂");
+    let state = app.state::<AppState>();
+    state.log(crate::logger::INFO, "aria2", "engine", "检测到任务与引擎失联，正在恢复下载任务", "");
+    resume_pending_tasks(app).await;
 }
 
 /// 发起 JSON-RPC 请求：Unauthorized / 连接级失败走互斥自愈重拉（引擎崩溃不再永久停摆），
@@ -903,6 +936,41 @@ pub async fn pause(app: &AppHandle, id: i64) -> AppResult<()> {
     Ok(())
 }
 
+/// 恢复 / 重挂前的直链与请求头：夸克任务按 fetch_ctx 重新取链（直链与 __puus 都有时效），
+/// 成功则回写 DB 供后续恢复使用；失败沿用 DB 旧值（旧直链可能仍可用），错误只记日志。
+async fn refreshed_target(
+    app: &AppHandle,
+    id: i64,
+    platform: &str,
+    fetch_ctx: &str,
+    file_name: &str,
+    fallback_url: String,
+    fallback_headers: Vec<(String, String)>,
+) -> (String, Vec<(String, String)>) {
+    if platform != "quark" || fetch_ctx.is_empty() {
+        return (fallback_url, fallback_headers);
+    }
+    let state = app.state::<AppState>();
+    match crate::resolve::refresh_quark_download_link(&state, fetch_ctx).await {
+        Ok((fresh_url, fresh_headers)) => {
+            if let Ok(fresh_json) = serde_json::to_string(&fresh_headers) {
+                if let Ok(conn) = state.db.lock() {
+                    let _ = conn.execute(
+                        "UPDATE download_task SET url = ?1, request_headers_json = ?2 WHERE id = ?3",
+                        rusqlite::params![fresh_url, fresh_json, id],
+                    );
+                }
+            }
+            state.log(crate::logger::INFO, "quark", "download", "恢复前已重新取链（直链已刷新）", file_name);
+            (fresh_url, fresh_headers)
+        }
+        Err(e) => {
+            state.log(crate::logger::ERROR, "quark", "download", "重新取链失败，沿用原直链恢复", &e.to_string());
+            (fallback_url, fallback_headers)
+        }
+    }
+}
+
 /// 恢复
 pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     let state = app.state::<AppState>();
@@ -938,28 +1006,9 @@ pub async fn resume(app: &AppHandle, id: i64) -> AppResult<()> {
     if !unpaused {
         let mut url = url.clone();
         let mut headers: Vec<(String, String)> = serde_json::from_str(&headers_json).unwrap_or_default();
-        // 直链与 __puus 都有时效：夸克任务走重入队（失败恢复 / unpause 失败）前先重新取链；
-        // 重新取链失败时沿用原直链恢复（可能仍可用），错误只记日志不阻断恢复。
-        if platform == "quark" && !fetch_ctx.is_empty() {
-            match crate::resolve::refresh_quark_download_link(&state, &fetch_ctx).await {
-                Ok((fresh_url, fresh_headers)) => {
-                    let fresh_headers_json = serde_json::to_string(&fresh_headers)?;
-                    {
-                        let conn = state.db.lock().map_err(|_| AppError::Lock)?;
-                        conn.execute(
-                            "UPDATE download_task SET url = ?1, request_headers_json = ?2 WHERE id = ?3",
-                            rusqlite::params![fresh_url, fresh_headers_json, id],
-                        )?;
-                    }
-                    url = fresh_url;
-                    headers = fresh_headers;
-                    state.log(crate::logger::INFO, "quark", "download", "恢复前已重新取链（直链已刷新）", &file_name);
-                }
-                Err(e) => {
-                    state.log(crate::logger::ERROR, "quark", "download", "重新取链失败，沿用原直链恢复", &e.to_string());
-                }
-            }
-        }
+        let refreshed = refreshed_target(app, id, &platform, &fetch_ctx, &file_name, url.clone(), headers).await;
+        url = refreshed.0;
+        headers = refreshed.1;
         // 重新入队 aria2（用于从失败态恢复或 unpause 失败时重入队，支持断点续传）
         let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
         let new_gid = add_to_aria2(app, id, &url, &file_name, &headers, &platform, &cleanup_id, false, mirrors).await?;
@@ -1204,10 +1253,10 @@ async fn resume_torrent_task(app: &AppHandle, id: i64) {
 /// - 其余（gid 失效 / 空）清 gid 重新 addUri，paused 状态的以暂停态入队
 async fn resume_pending_tasks(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let rows: Vec<(i64, String, String, String, String, String, String, String, bool)> = {
+    let rows: Vec<(i64, String, String, String, String, String, String, String, String, bool)> = {
         let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, status \
+            "SELECT id, gid, url, file_name, request_headers_json, platform, cleanup_id, mirrors_json, fetch_ctx_json, status \
              FROM download_task WHERE status IN (0, 1, 2)",
         ) {
             Ok(s) => s,
@@ -1224,7 +1273,8 @@ async fn resume_pending_tasks(app: &AppHandle) {
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, String>(7)?,
-                    r.get::<_, i32>(8)? == DownloadTaskView::STATUS_PAUSED,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, i32>(9)? == DownloadTaskView::STATUS_PAUSED,
                 ))
             })
             .map(|rows| rows.filter_map(Result::ok).collect())
@@ -1232,7 +1282,7 @@ async fn resume_pending_tasks(app: &AppHandle) {
         rows
     };
     let live = live_engine_gids().await;
-    for (id, gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, was_paused) in rows {
+    for (id, gid, url, file_name, headers_json, platform, cleanup_id, mirrors_json, fetch_ctx, was_paused) in rows {
         // BT 种子文件任务：走 addTorrent 恢复
         if url.starts_with("torrent:") {
             resume_torrent_task(app, id).await;
@@ -1244,6 +1294,9 @@ async fn resume_pending_tasks(app: &AppHandle) {
         }
         let headers: Vec<(String, String)> =
             serde_json::from_str(&headers_json).unwrap_or_default();
+        // 夸克任务重挂前重新取链（成功回写 DB），避免旧直链已失效
+        let (url, headers) =
+            refreshed_target(app, id, &platform, &fetch_ctx, &file_name, url, headers).await;
         let mirrors: Vec<String> = serde_json::from_str(&mirrors_json).unwrap_or_default();
         // 清掉旧 gid（新 aria2 实例不认识）
         {
@@ -1486,7 +1539,18 @@ async fn poll_loop(app: AppHandle) {
             .filter(|r| r.active && !r.gid.is_empty())
             .map(|r| r.gid.clone())
             .collect();
-        let mut status_iter = tell_status_batch(&active_gids).await.into_iter();
+        let batch = tell_status_batch(&active_gids).await;
+        // 引擎换代（崩溃自愈 / 进程被杀）会让所有活跃 gid 失联：后台触发重挂，
+        // 期间界面短暂保持 DB 状态，重挂完成后按新 gid 继续轮询
+        let unknown_active = batch.iter().filter(|x| x.is_none()).count();
+        let active_total = active_gids.len();
+        if unknown_active > 0 {
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                remount_if_detached(&app2, unknown_active, active_total).await;
+            });
+        }
+        let mut status_iter = batch.into_iter();
 
         let mut views: Vec<DownloadTaskView> = Vec::new();
         let mut persist_due = last_persist.elapsed() >= std::time::Duration::from_secs(2);

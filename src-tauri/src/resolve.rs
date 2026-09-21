@@ -111,6 +111,10 @@ impl ResolveSessions {
     }
 }
 
+/// 夸克链路统一登录态提示：覆盖「刚完成登录但异步校验尚未落库」的竞态窗口
+/// （登录 WebView 每 2s 轮询 Cookie 并异步验证后才写库，期间解析/取链读不到账号行）
+const QUARK_LOGIN_HINT: &str = "未检测到夸克登录态：刚完成登录请等几秒重试，否则请先登录夸克网盘";
+
 pub(crate) fn load_account_cookie(state: &AppState, platform: Platform, need_login_msg: &str) -> AppResult<String> {
     let conn = state.db.lock().map_err(|_| AppError::Lock)?;
     let active = state.active_account_key(&platform);
@@ -198,7 +202,7 @@ pub(crate) async fn refresh_quark_download_link(
 ) -> AppResult<(String, Vec<(String, String)>)> {
     let fid = parse_fetch_fid(ctx)
         .ok_or_else(|| AppError::Api("取链上下文缺失，无法重新取链".into()))?;
-    let mut cookie = load_account_cookie(state, Platform::Quark, "请先登录夸克网盘")?;
+    let mut cookie = load_account_cookie(state, Platform::Quark, QUARK_LOGIN_HINT)?;
     if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
         if refreshed != cookie {
             persist_cookie(state, Platform::Quark, &refreshed, "");
@@ -450,7 +454,7 @@ async fn build_session(
 ) -> AppResult<(Vec<ShareFile>, String)> {
     let (files, title) = match platform {
         Platform::Quark => {
-            let cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            let cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
             let (stoken, title) = quark::get_share_token(&state.http, &parsed.share_id, &parsed.pwd, &cookie).await?;
             session.stoken = stoken;
             let (files, _) = quark::get_share_files(&state.http, &parsed.share_id, &session.stoken, "0", &cookie, 1, 100).await?;
@@ -610,7 +614,7 @@ pub async fn list_share_files(
     let dir_changed = session.last_dir != dir_id;
     let (files, has_more) = match platform {
         Platform::Quark => {
-            let cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            let cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
             let (files, _) = quark::get_share_files(&state.http, &session.share_id, &session.stoken, dir_id, &cookie, page, 100).await?;
             let has_more = files.len() >= 100;
             (files, has_more)
@@ -717,7 +721,7 @@ pub async fn get_download_link(
     let share_id = session.share_id.clone();
     match platform {
         Platform::Quark => {
-            let mut cookie = load_account_cookie(state, platform, "请先登录夸克网盘")?;
+            let mut cookie = load_account_cookie(state, platform, QUARK_LOGIN_HINT)?;
             // 取链前刷新 __puus（修复 AlistGo/alist#830 下载 412）
             if let Ok(refreshed) = quark::refresh_session(&state.http, &cookie).await {
                 if refreshed != cookie {
