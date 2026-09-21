@@ -1,16 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
   Download,
   Loader2,
   Plus,
-  X,
   XCircle,
 } from "lucide-react";
 import { errMsg, ipc, type ShareFile } from "../lib/ipc";
 import { collectFolder, fetchAndEnqueue, looksLikeLink } from "../lib/download";
 import { formatBytes, platformLabel } from "../lib/format";
+import Drawer from "./ui/Drawer";
+import Button from "./ui/Button";
 
 interface BatchQueuePanelProps {
   open: boolean;
@@ -55,11 +56,6 @@ const STATUS_META: Record<ItemStatus, { text: string; cls: string }> = {
 
 /** 批量链接队列：粘贴多行链接 → 串行解析 → 默认全选 → 取链入队（右侧抽屉） */
 export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQueuePanelProps) {
-  const [shown, setShown] = useState(open);
-  const [leaving, setLeaving] = useState(false);
-  const shownRef = useRef(open);
-  shownRef.current = shown;
-
   const [text, setText] = useState("");
   const [items, setItems] = useState<BatchItem[]>([]);
   const [parsing, setParsing] = useState(false);
@@ -71,36 +67,6 @@ export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQu
   const progressBuffer = useRef<Map<number, Partial<BatchItem>>>(new Map());
   const progressTimer = useRef<number | null>(null);
 
-  // 进出动画（与 TaskDetailDrawer 同路径：右侧滑入滑出）
-  useEffect(() => {
-    if (open) {
-      setShown(true);
-      setLeaving(false);
-    } else if (shownRef.current) {
-      setLeaving(true);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (!leaving) return;
-    const timer = window.setTimeout(() => {
-      setShown(false);
-      setLeaving(false);
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [leaving]);
-
-  // Esc 关闭
-  useEffect(() => {
-    if (!shown) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !leaving) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [shown, leaving, onClose]);
-
-  if (!shown) return null;
 
   function patchItem(id: number, patch: Partial<BatchItem>) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
@@ -255,29 +221,18 @@ export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQu
   const doneCount = items.filter((it) => it.status === "done" || it.status === "partial").length;
 
   return (
-    <div className="fixed inset-0 z-[60]">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-fade" onClick={onClose} />
-      <aside
-        role="dialog"
-        aria-modal="true"
-        className={`absolute inset-y-0 right-0 flex w-[540px] max-w-[94vw] flex-col border-l border-ink/10 bg-carrier shadow-2xl ${
-          leaving ? "animate-drawer-out" : "animate-drawer-in"
-        }`}
-      >
-        {/* 头部 */}
-        <header className="flex shrink-0 items-center justify-between border-b border-ink/10 px-5 py-4">
-          <div>
-            <p className="font-mono text-[11px] tracking-[0.3em] text-ink-soft">BATCH · QUEUE</p>
-            <p className="mt-0.5 text-sm font-semibold text-ink">批量链接队列</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-carrier-deep hover:text-ink"
-            title="关闭 (Esc)"
-          >
-            <X size={16} />
-          </button>
-        </header>
+    <Drawer
+      open={open}
+      onClose={onClose}
+      widthClass="w-[540px] max-w-[94vw]"
+      bodyClassName="flex min-h-0 flex-1 flex-col"
+      title={
+        <div>
+          <p className="font-mono text-[11px] font-normal tracking-[0.3em] text-ink-soft">BATCH · QUEUE</p>
+          <p className="mt-0.5 text-sm font-semibold text-ink">批量链接队列</p>
+        </div>
+      }
+    >
 
         {/* 粘贴区 */}
         <div className="shrink-0 space-y-2 border-b border-ink/10 p-5">
@@ -480,20 +435,13 @@ export default function BatchQueuePanel({ open, onClose, onGoDownload }: BatchQu
           )}
         </div>
 
-        {/* 底部 */}
-        <footer className="flex shrink-0 items-center justify-between border-t border-ink/10 px-5 py-3">
-          <p className="text-[10px] text-ink-soft/60">关闭面板仅收起，队列与状态保留（不入队的链接不受影响）</p>
-          <button
-            onClick={() => {
-              onClose();
-              onGoDownload();
-            }}
-            className="rounded-ctrl border border-ink/15 px-3 py-1 text-[11px] font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
-          >
-            前往下载页
-          </button>
-        </footer>
-      </aside>
-    </div>
+      {/* 底部 */}
+      <div className="flex shrink-0 items-center justify-between border-t border-ink/10 px-5 py-3">
+        <p className="text-[10px] text-ink-soft/60">关闭面板仅收起，队列与状态保留（不入队的链接不受影响）</p>
+        <Button variant="outline" size="sm" onClick={() => { onClose(); onGoDownload(); }}>
+          前往下载页
+        </Button>
+      </div>
+    </Drawer>
   );
 }

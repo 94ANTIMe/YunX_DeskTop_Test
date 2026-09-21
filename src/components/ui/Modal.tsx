@@ -4,7 +4,7 @@ import { X } from "lucide-react";
 interface ModalProps {
   open: boolean;
   onClose: () => void;
-  title?: string;
+  title?: ReactNode;
   children?: ReactNode;
   footer?: ReactNode;
   /** alertdialog 用于不可逆确认类弹层 */
@@ -14,6 +14,8 @@ interface ModalProps {
   showClose?: boolean;
   /** 追加到面板的类（覆盖 max-w 等） */
   panelClassName?: string;
+  /** 内容区类：默认带内边距；全出血内容传 "" */
+  bodyClassName?: string;
 }
 
 /**
@@ -32,6 +34,7 @@ export default function Modal({
   closeOnOverlay = true,
   showClose = true,
   panelClassName = "",
+  bodyClassName = "px-5 py-4",
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -69,14 +72,14 @@ export default function Modal({
         tabIndex={-1}
         role={kind}
         aria-modal="true"
-        aria-label={title}
+        aria-label={typeof title === "string" ? title : undefined}
         className={`w-full max-w-md animate-rise rounded-card border border-ink/10 bg-carrier shadow-capsule outline-none ${panelClassName}`}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || showClose) && (
           <div className="flex items-center justify-between gap-3 px-5 pt-4">
             {title ? (
-              <h3 className="text-sm font-semibold text-ink">{title}</h3>
+              <div className="min-w-0 text-sm font-semibold text-ink">{title}</div>
             ) : (
               <span aria-hidden />
             )}
@@ -91,7 +94,7 @@ export default function Modal({
             )}
           </div>
         )}
-        {children && <div className="px-5 py-4">{children}</div>}
+        {children && <div className={bodyClassName}>{children}</div>}
         {footer && <div className="flex justify-end gap-2 px-5 pb-4">{footer}</div>}
       </div>
     </div>

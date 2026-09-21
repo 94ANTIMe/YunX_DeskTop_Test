@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   CheckCircle2,
   FolderOpen,
   Loader2,
-  X,
   XCircle,
 } from "lucide-react";
 import { ipc, type DownloadDetail, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatDate, formatRemain, formatSpeed, platformLabel } from "../lib/format";
+import Drawer from "./ui/Drawer";
+import Button from "./ui/Button";
 
 interface TaskDetailDrawerProps {
   /** 当前展开详情的任务（null = 关闭） */
@@ -109,40 +110,13 @@ function avgSpeedText(task: DownloadTask, totalTime: number): string {
 
 /** 任务详情抽屉：右侧滑入固定面板（点击行 / Esc / 遮罩均可关闭），承载原内嵌 Dashboard 全部内容 */
 export default function TaskDetailDrawer({ task, history, onClose }: TaskDetailDrawerProps) {
+  // 数据快照：任务出现 → 记录；任务变 null → 保留数据，供 ui/Drawer 滑出动画期间继续渲染
   const [shown, setShown] = useState<DownloadTask | null>(task);
-  const [leaving, setLeaving] = useState(false);
   const [detail, setDetail] = useState<DownloadDetail | null>(null);
-  const shownRef = useRef<DownloadTask | null>(shown);
-  shownRef.current = shown;
 
-  // 进出动画：任务出现 → 立即展示；任务变 null → 先播放滑出再卸载（同路径进出）
   useEffect(() => {
-    if (task) {
-      setShown(task);
-      setLeaving(false);
-    } else if (shownRef.current) {
-      setLeaving(true);
-    }
+    if (task) setShown(task);
   }, [task]);
-
-  useEffect(() => {
-    if (!leaving) return;
-    const timer = window.setTimeout(() => {
-      setShown(null);
-      setLeaving(false);
-    }, 220);
-    return () => window.clearTimeout(timer);
-  }, [leaving]);
-
-  // Esc 关闭
-  useEffect(() => {
-    if (!shown) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [shown, onClose]);
 
   // 展开期间每 2s 轮询详情扩展字段（连接数 / 耗时 / 上传速度）
   useEffect(() => {
@@ -178,33 +152,20 @@ export default function TaskDetailDrawer({ task, history, onClose }: TaskDetailD
   const createTime = t.createTime || (detail && detail.id === t.id ? detail.createTime : 0);
 
   return (
-    <div className="fixed inset-0 z-[60]">
-      {/* 遮罩：点击关闭 */}
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-fade" onClick={onClose} />
-
-      <aside
-        role="dialog"
-        aria-modal="true"
-        className={`absolute inset-y-0 right-0 flex w-[440px] max-w-[92vw] flex-col border-l border-ink/10 bg-carrier shadow-2xl ${
-          leaving ? "animate-drawer-out" : "animate-drawer-in"
-        }`}
-      >
-        {/* 头部 */}
-        <header className="flex shrink-0 items-center justify-between border-b border-ink/10 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <p className="font-mono text-[11px] tracking-[0.3em] text-ink-soft">TASK · DASHBOARD</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-carrier-deep hover:text-ink"
-            title="关闭详情 (Esc)"
-          >
-            <X size={16} />
-          </button>
-        </header>
-
-        {/* 内容 */}
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">
+    <Drawer
+      open={Boolean(task)}
+      onClose={onClose}
+      title={<p className="font-mono text-[11px] font-normal tracking-[0.3em] text-ink-soft">TASK · DASHBOARD</p>}
+      footer={
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>
+            收起详情
+          </Button>
+        </div>
+      }
+    >
+      {/* 内容 */}
+      <div className="p-5">
           {/* 环形进度 + 文件信息 + 大号速度 */}
           <div className="flex items-center gap-5">
             <ProgressRing pct={pct} failed={failed} />
@@ -314,16 +275,6 @@ export default function TaskDetailDrawer({ task, history, onClose }: TaskDetailD
           </dl>
         </div>
 
-        {/* 底部 */}
-        <footer className="flex shrink-0 justify-end border-t border-ink/10 px-5 py-3">
-          <button
-            onClick={onClose}
-            className="rounded-ctrl border border-ink/15 px-3 py-1 text-[11px] font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
-          >
-            收起详情
-          </button>
-        </footer>
-      </aside>
-    </div>
+    </Drawer>
   );
 }

@@ -9,6 +9,8 @@ interface DrawerProps {
   footer?: ReactNode;
   /** 面板宽度（默认与任务详情抽屉一致） */
   widthClass?: string;
+  /** 内容区布局类：默认整体滚动；多段布局（固定区 + 滚动列表）可传 flex-col 自行分段 */
+  bodyClassName?: string;
 }
 
 const LEAVE_MS = 220;
@@ -25,6 +27,7 @@ export default function Drawer({
   children,
   footer,
   widthClass = "w-[440px] max-w-[92vw]",
+  bodyClassName = "min-h-0 flex-1 overflow-y-auto",
 }: DrawerProps) {
   const [shown, setShown] = useState(open);
   const [leaving, setLeaving] = useState(false);
@@ -95,7 +98,7 @@ export default function Drawer({
             <X size={16} />
           </button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+        <div className={bodyClassName}>{children}</div>
         {footer && <div className="shrink-0 border-t border-ink/10 px-5 py-3">{footer}</div>}
       </aside>
     </div>

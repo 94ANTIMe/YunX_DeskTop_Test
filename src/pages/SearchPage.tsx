@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Bell, Link2, Loader2, Plus, RefreshCw, Rss, Search as SearchIcon, Trash2, X } from "lucide-react";
+import { Bell, Link2, Loader2, Plus, RefreshCw, Rss, Search as SearchIcon, Trash2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import EmptyState from "../components/EmptyState";
 import { errMsg, ipc, DEFAULT_SETTINGS, type SearchItem, type Settings, type Subscription } from "../lib/ipc";
 import { toast } from "../lib/toast";
+import Modal from "../components/ui/Modal";
+import Button from "../components/ui/Button";
 import { platformLabel } from "../lib/format";
 import searchHero from "../assets/art/search-hero.jpg";
 
@@ -386,26 +388,27 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
 
       {/* 新建订阅对话框 */}
       {subForm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => !subSubmitting && setSubForm(null)}
+        <Modal
+          open
+          onClose={() => !subSubmitting && setSubForm(null)}
+          title={
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <Rss size={15} className="text-clay" />
+              新建订阅
+            </h3>
+          }
+          footer={
+            <>
+              <Button variant="outline" size="sm" disabled={subSubmitting} onClick={() => setSubForm(null)}>
+                取消
+              </Button>
+              <Button variant="primary" size="sm" disabled={!subForm.keyword.trim() || subSubmitting} onClick={submitSubForm}>
+                {subSubmitting && <Loader2 size={12} className="animate-spin" />}
+                订阅
+              </Button>
+            </>
+          }
         >
-          <div
-            className="w-full max-w-md rounded-card bg-carrier p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
-                <Rss size={15} className="text-clay" />
-                新建订阅
-              </h3>
-              <button
-                onClick={() => setSubForm(null)}
-                className="rounded-ctrl p-1 text-ink-soft transition-colors hover:text-ink"
-              >
-                <X size={15} />
-              </button>
-            </div>
             <div className="mt-4 space-y-3">
               <div>
                 <label className="text-xs text-ink-soft">搜索关键词</label>
@@ -446,25 +449,7 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
                 订阅后按设置页的检查间隔定时搜索：识别到新集数（S01E02 / 第12集 / EP03 等）即自动解析下载，已下载的集数不会重复。
               </p>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setSubForm(null)}
-                disabled={subSubmitting}
-                className="rounded-ctrl border border-ink/15 px-4 py-1.5 text-xs font-medium text-ink transition-colors hover:border-clay disabled:opacity-50"
-              >
-                取消
-              </button>
-              <button
-                onClick={submitSubForm}
-                disabled={!subForm.keyword.trim() || subSubmitting}
-                className="flex items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
-              >
-                {subSubmitting && <Loader2 size={12} className="animate-spin" />}
-                订阅
-              </button>
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

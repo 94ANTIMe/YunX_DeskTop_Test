@@ -20,6 +20,7 @@ import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import BatchQueuePanel from "../components/BatchQueuePanel";
 import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
 import { toast } from "../lib/toast";
+import Modal from "../components/ui/Modal";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
 import resolveHero from "../assets/art/resolve-hero.jpg";
@@ -736,24 +737,13 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
 
       {/* 收藏夹浮层 */}
       {showBookmarks && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20 p-8 backdrop-blur-sm"
-          onClick={() => setShowBookmarks(false)}
+        <Modal
+          open
+          onClose={() => setShowBookmarks(false)}
+          panelClassName="max-w-lg overflow-hidden"
+          bodyClassName="max-h-[52vh] overflow-y-auto px-6 py-2"
+          title={<h3 className="font-display text-lg font-semibold text-ink">收藏的分享链接</h3>}
         >
-          <div
-            className="max-h-[70vh] w-full max-w-lg animate-rise overflow-hidden rounded-card bg-carrier shadow-capsule"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-ink/10 px-6 py-4">
-              <h3 className="font-display text-lg font-semibold text-ink">收藏的分享链接</h3>
-              <button
-                onClick={() => setShowBookmarks(false)}
-                className="rounded-ctrl px-2 py-1 text-xs text-ink-soft hover:bg-carrier-deep hover:text-ink"
-              >
-                关闭
-              </button>
-            </div>
-            <div className="max-h-[52vh] overflow-y-auto px-6 py-2">
               {bookmarks.length === 0 ? (
                 <p className="py-10 text-center text-sm text-ink-soft">暂无收藏</p>
               ) : (
@@ -788,41 +778,30 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                   ))}
                 </ul>
               )}
-            </div>
-          </div>
-        </div>
+      </Modal>
       )}
 
       {/* 解析记录浮层 */}
       {showHistory && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20 p-8 backdrop-blur-sm"
-          onClick={() => setShowHistory(false)}
-        >
-          <div
-            className="max-h-[70vh] w-full max-w-lg animate-rise overflow-hidden rounded-card bg-carrier shadow-capsule"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-ink/10 px-6 py-4">
+        <Modal
+          open
+          onClose={() => setShowHistory(false)}
+          panelClassName="max-w-lg overflow-hidden"
+          bodyClassName="max-h-[52vh] overflow-y-auto px-6 py-2"
+          title={
+            <div className="flex items-center gap-2">
               <h3 className="font-display text-lg font-semibold text-ink">解析记录</h3>
-              <div className="flex items-center gap-2">
-                {history.length > 0 && (
-                  <button
-                    onClick={clearHistory}
-                    className="rounded-ctrl px-2.5 py-1 text-xs text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
-                  >
-                    清空记录
-                  </button>
-                )}
+              {history.length > 0 && (
                 <button
-                  onClick={() => setShowHistory(false)}
-                  className="rounded-ctrl px-2 py-1 text-xs text-ink-soft hover:bg-carrier-deep hover:text-ink"
+                  onClick={clearHistory}
+                  className="cursor-pointer rounded-ctrl px-2.5 py-1 text-xs text-ink-soft transition-colors hover:bg-clay/10 hover:text-clay-deep"
                 >
-                  关闭
+                  清空记录
                 </button>
-              </div>
+              )}
             </div>
-            <div className="max-h-[52vh] overflow-y-auto px-6 py-2">
+          }
+        >
               {history.length === 0 ? (
                 <p className="py-10 text-center text-sm text-ink-soft">暂无解析记录</p>
               ) : (
@@ -860,9 +839,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                   ))}
                 </ul>
               )}
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* 批量链接队列抽屉 */}

@@ -16,7 +16,7 @@ import EmptyState from "../components/EmptyState";
 import CrossDriveSearchModal from "../components/CrossDriveSearchModal";
 import DownloadSummary from "../components/DownloadSummary";
 import TaskDetailDrawer from "../components/TaskDetailDrawer";
-import ConfirmDialog from "../components/ConfirmDialog";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { errMsg, ipc, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatRemain, formatSpeed, platformLabel } from "../lib/format";
 import { clearLocalTasks, forgetTask, getSpeedHistory, useDownloadsState } from "../hooks/useDownloads";

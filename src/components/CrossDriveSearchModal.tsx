@@ -3,11 +3,11 @@ import {
   Loader2,
   Search,
   Sparkles,
-  X,
   Zap,
 } from "lucide-react";
 import { errMsg, ipc, type SearchItem } from "../lib/ipc";
 import { platformLabel } from "../lib/format";
+import Modal from "./ui/Modal";
 
 /** 自动清洗文件名称，提取核心搜索关键词 */
 export function cleanSearchKeyword(filename: string): string {
@@ -88,24 +88,22 @@ export default function CrossDriveSearchModal({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm animate-fade">
-      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-card border border-ink/10 bg-carrier shadow-2xl">
-        {/* 标题栏 */}
-        <div className="flex items-center justify-between border-b border-ink/10 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <Sparkles size={18} className="text-clay" />
-            <h3 className="text-base font-semibold text-ink">跨网盘秒搜同款资源</h3>
-            <span className="rounded-full bg-clay/10 px-2.5 py-0.5 text-[11px] font-medium text-clay-deep">
-              绕过限速·免VIP满速下载
-            </span>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-ctrl p-1.5 text-ink-soft transition-colors hover:bg-ink/5 hover:text-ink"
-          >
-            <X size={18} />
-          </button>
+    <Modal
+      open
+      onClose={onClose}
+      showClose
+      panelClassName="flex max-h-[85vh] flex-col max-w-2xl"
+      bodyClassName="flex min-h-0 flex-1 flex-col"
+      title={
+        <div className="flex items-center gap-2">
+          <Sparkles size={18} className="text-clay" />
+          <h3 className="text-base font-semibold text-ink">跨网盘秒搜同款资源</h3>
+          <span className="rounded-full bg-clay/10 px-2.5 py-0.5 text-[11px] font-medium text-clay-deep">
+            绕过限速·免VIP满速下载
+          </span>
         </div>
+      }
+    >
 
         {/* 搜索输入与关键词 */}
         <div className="border-b border-ink/10 bg-carrier-deep/40 px-5 py-3.5">
@@ -209,17 +207,16 @@ export default function CrossDriveSearchModal({
           )}
         </div>
 
-        {/* 底部提示 */}
-        <div className="flex items-center justify-between border-t border-ink/10 bg-carrier-deep/30 px-5 py-2.5 text-[11px] text-ink-soft/80">
-          <span>提示：夸克、UC 与 123 云盘对普通免费账号不限速，转存即可享最高数十 MB/s 下载。</span>
-          <button
-            onClick={onClose}
-            className="rounded-ctrl px-3 py-1 text-xs text-ink-soft hover:text-ink"
-          >
-            关闭
-          </button>
-        </div>
+      {/* 底部提示 */}
+      <div className="flex shrink-0 items-center justify-between border-t border-ink/10 bg-carrier-deep/30 px-5 py-2.5 text-[11px] text-ink-soft/80">
+        <span>提示：夸克、UC 与 123 云盘对普通免费账号不限速，转存即可享最高数十 MB/s 下载。</span>
+        <button
+          onClick={onClose}
+          className="cursor-pointer rounded-ctrl px-3 py-1 text-xs text-ink-soft transition-colors hover:text-ink"
+        >
+          关闭
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
