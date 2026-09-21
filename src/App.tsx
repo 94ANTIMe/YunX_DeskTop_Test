@@ -16,7 +16,8 @@ import { useAppearanceSaver } from "./hooks/useAppearance";
 import { useUpdate } from "./hooks/useUpdate";
 import { useDownloads } from "./hooks/useDownloads";
 import { ipc, onClipboardShare, onSettingsUpdated, type ClipboardShareEvent, type Settings } from "./lib/ipc";
-import type { TabId } from "./lib/tabs";
+import { TABS, type TabId } from "./lib/tabs";
+import { looksLikeLink } from "./lib/download";
 
 // 常驻挂载的页面全部 memo 化：App 层状态变化（切 Tab / 更新横幅进度 / 剪贴板提示）
 // 不再触发七个隐藏页整树 reconcile；回调 props 均已 useCallback 稳定
@@ -114,6 +115,20 @@ export default function App() {
     if (!showSearchTab && tab === "search") setTab("resolve");
   }, [showSearchTab, tab]);
 
+  // 全局快捷键（B3.3）：Ctrl+1~7 按可见 Tab 顺序切页
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+      if (e.key < "1" || e.key > "7") return;
+      const visible = TABS.filter((t) => !(t.id === "search" && !showSearchTab));
+      const target = visible[Number(e.key) - 1];
+      if (target) setTab(target.id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showSearchTab]);
+
+
   /** 下载并安装最新版本（装完应用自动退出重启） */
   async function applyUpdate() {
     await updater.apply();
@@ -138,6 +153,17 @@ export default function App() {
   }, []);
 
   const consumePendingResolve = useCallback(() => setPendingResolve(null), []);
+  // 全局 Ctrl+V：非输入焦点粘贴分享链接 → 直接进入解析（与剪贴板提示共用 goResolve，天然去重）
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      const text = e.clipboardData?.getData("text") ?? "";
+      if (looksLikeLink(text)) goResolve(text.trim());
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [goResolve]);
   const dismissClipShare = useCallback(() => setClipShare(null), []);
 
   const showUpdateBanner = !updateDismissed && !!updater.info?.hasUpdate;

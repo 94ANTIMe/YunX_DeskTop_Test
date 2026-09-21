@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import Skeleton from "../components/ui/Skeleton";
 import { RefreshCw } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import EmptyState from "../components/EmptyState";
@@ -37,8 +38,17 @@ function DailyChart({ days }: { days: { day: string; bytes: number; files: numbe
             const h = d.bytes > 0 ? Math.max(4, Math.round((d.bytes / max) * 100)) : 0;
             const date = new Date(`${d.day}T00:00:00`);
             const label = `${date.getMonth() + 1}/${date.getDate()}`;
+            const summary = d.bytes > 0
+              ? `${label}，下载 ${formatBytes(d.bytes)}，${d.files} 个文件${d.failed > 0 ? `，失败 ${d.failed}` : ""}`
+              : `${label}，无下载流量`;
             return (
-              <div key={d.day} className="group relative flex h-full min-w-0 flex-1 items-end">
+              <div
+                key={d.day}
+                tabIndex={0}
+                role="img"
+                aria-label={summary}
+                className="group relative flex h-full min-w-0 flex-1 items-end focus-visible:z-20"
+              >
                 {/* 柱体（0 流量画基线短桩） */}
                 <div
                   className={`w-full rounded-t-sm transition-colors ${
@@ -48,7 +58,7 @@ function DailyChart({ days }: { days: { day: string; bytes: number; files: numbe
                 />
                 {/* hover 明细 */}
                 {d.bytes > 0 && (
-                  <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 hidden -translate-x-1/2 whitespace-nowrap rounded-ctrl bg-ink px-2.5 py-1.5 text-[10px] leading-relaxed text-ivory shadow-capsule group-hover:block">
+                  <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 hidden -translate-x-1/2 whitespace-nowrap rounded-ctrl bg-ink px-2.5 py-1.5 text-[10px] leading-relaxed text-ivory shadow-capsule group-hover:block group-focus-visible:block">
                     <p className="font-mono font-semibold">{label}</p>
                     <p className="font-mono">{formatBytes(d.bytes)} · {d.files} 个文件</p>
                     {d.failed > 0 && <p className="text-clay">失败 {d.failed}</p>}
@@ -171,7 +181,21 @@ export default function StatsPage({ active }: { active: boolean }) {
         <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
 
-      {!hasData ? (
+      {!hasData && loading && !stats ? (
+        <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-4">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rounded-card bg-carrier p-5">
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="mt-3 h-7 w-24" />
+              </div>
+            ))}
+          </div>
+          <div className="rounded-card bg-carrier p-5">
+            <Skeleton className="h-40 w-full" />
+          </div>
+        </div>
+      ) : !hasData ? (
         <div className="rounded-card bg-carrier">
           <EmptyState
             title="暂无下载数据"

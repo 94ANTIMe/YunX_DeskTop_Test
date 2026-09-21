@@ -44,7 +44,7 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
         showSearchTab: showSearch,
         onboarded: true,
       });
-      onDone();
+      setStep(2); // 进入完成步骤，由「进入云析」按钮调用 onDone（B3.6 死代码复活）
     } catch (e) {
       setError(errMsg(e));
       setSaving(false);
@@ -238,6 +238,13 @@ export default function OnboardingPage({ settings, onDone }: OnboardingPageProps
             </div>
             <h2 className="mt-4 font-display text-2xl font-semibold text-ink">配置完成</h2>
             <p className="mt-2 text-sm text-ink-soft">开始使用云析吧，祝下载愉快。</p>
+            <button
+              onClick={onDone}
+              className="mt-6 inline-flex cursor-pointer items-center gap-1.5 rounded-ctrl bg-clay px-8 py-2.5 text-sm font-semibold text-on-accent transition-colors enabled:hover:bg-clay-deep"
+            >
+              <Check size={15} />
+              进入云析
+            </button>
           </section>
         )}
       </div>

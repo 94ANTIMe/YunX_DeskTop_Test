@@ -5,6 +5,8 @@ import PageHeader from "../components/PageHeader";
 import LoginDialog from "../components/LoginDialog";
 import PanFileManager from "../components/PanFileManager";
 import { errMsg, ipc, onLoginSuccess, type AccountRow, type AccountSummary } from "../lib/ipc";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
+import Skeleton from "../components/ui/Skeleton";
 import type { TabId } from "../lib/tabs";
 import driveHero from "../assets/art/drive-hero.jpg";
 
@@ -35,6 +37,7 @@ const PLATFORMS: DrivePlatform[] = [
 /** 网盘页：账号登录/登出 + 个人网盘文件浏览与一键直链直取 */
 export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = {}) {
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
+  const [loaded, setLoaded] = useState(false);
   // 各平台账号行缓存（拉开下拉时按需加载）
   const [rows, setRows] = useState<Record<string, AccountRow[]>>({});
   // 当前展开的账号下拉（platform | null）
@@ -46,8 +49,10 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
   async function refresh() {
     try {
       setAccounts(await ipc.listAccounts());
+      setLoaded(true);
     } catch (e) {
       setError(errMsg(e));
+      setLoaded(true);
     }
   }
 
@@ -66,6 +71,9 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
     };
   }, []);
 
+  /** 登出确认（B3.2）：platform + 账号 key（key 空 = 登出当前账号） */
+  const [confirmLogout, setConfirmLogout] = useState<{ platform: string; key?: string } | null>(null);
+
   async function logout(platform: string, key?: string) {
     setError("");
     try {
@@ -78,6 +86,25 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
   }
 
   /** 拉取平台账号行（下拉展开时加载） */
+  // 账号下拉打开时：点击外部或 Esc 关闭（B3.4；面板与触发器带 data-account-menu 标记）
+  useEffect(() => {
+    if (!openMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenu(null);
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && el.closest("[data-account-menu]")) return;
+      setOpenMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouseDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouseDown);
+    };
+  }, [openMenu]);
+
   async function toggleMenu(platform: string) {
     if (openMenu === platform) {
       setOpenMenu(null);
@@ -131,6 +158,20 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
         <div className="rounded-ctrl bg-danger/10 px-4 py-2.5 text-sm text-danger">{error}</div>
       )}
 
+      <ConfirmDialog
+        open={confirmLogout != null}
+        danger
+        title={confirmLogout?.key ? "退出该账号？" : "登出该网盘？"}
+        description="登出后需要重新扫码 / 授权登录才能继续浏览与下载。"
+        confirmText="确认登出"
+        onConfirm={() => {
+          const ask = confirmLogout;
+          setConfirmLogout(null);
+          if (ask) void logout(ask.platform, ask.key);
+        }}
+        onCancel={() => setConfirmLogout(null)}
+      />
+
       {/* hero 插画带 */}
       <section className="flex animate-rise items-center justify-between gap-8 rounded-card bg-carrier p-6" style={{ animationDelay: "60ms" }}>
         <div>
@@ -146,7 +187,18 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
       </section>
 
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-3">
-        {PLATFORMS.map((p, i) => {
+        {!loaded
+          ? [0, 1, 2, 3].map((i) => (
+              <div key={i} className="animate-rise rounded-card bg-carrier p-5">
+                <Skeleton className="h-2.5 w-16" />
+                <Skeleton className="mt-3 h-6 w-28" />
+                <div className="mt-4 flex gap-2">
+                  <Skeleton className="h-7 w-24" />
+                  <Skeleton className="h-7 w-20" />
+                </div>
+              </div>
+            ))
+          : PLATFORMS.map((p, i) => {
           const acc = summary(p.id);
           return (
             <section
@@ -169,7 +221,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
               {p.note && <p className="mt-2 text-[11px] text-clay-deep">{p.note}</p>}
               <div className="mt-4 flex items-center gap-2">
                 {acc?.loggedIn ? (
-                  <div className="relative min-w-0 flex-1">
+                  <div data-account-menu className="relative min-w-0 flex-1">
                     {/* 当前账号 + 展开下拉 */}
                     <button
                       onClick={() => toggleMenu(p.id)}
@@ -208,7 +260,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                             {row.active && <Check size={13} className="shrink-0 text-clay" />}
                             {!row.active && (
                               <button
-                                onClick={() => logout(p.id, row.key)}
+                                onClick={() => setConfirmLogout({ platform: p.id, key: row.key })}
                                 className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-ink-soft/70 hover:bg-clay/10 hover:text-clay-deep"
                                 title="退出该账号"
                               >
@@ -243,7 +295,7 @@ export default function DrivePage({ onNavigate, onGoResolve }: DrivePageProps = 
                 )}
                 {acc?.loggedIn ? (
                   <button
-                    onClick={() => logout(p.id)}
+                    onClick={() => setConfirmLogout({ platform: p.id })}
                     className="flex shrink-0 items-center gap-1.5 rounded-ctrl border border-ink/15 px-3.5 py-1.5 text-xs font-medium text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
                   >
                     <LogOut size={13} />

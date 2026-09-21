@@ -6,6 +6,7 @@ import { errMsg, ipc, DEFAULT_SETTINGS, type SearchItem, type Settings, type Sub
 import { toast } from "../lib/toast";
 import Modal from "../components/ui/Modal";
 import Button from "../components/ui/Button";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { platformLabel } from "../lib/format";
 import searchHero from "../assets/art/search-hero.jpg";
 
@@ -132,6 +133,8 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
       toast.error(errMsg(e));
     }
   }
+
+  const [confirmRemoveSub, setConfirmRemoveSub] = useState<number | null>(null);
 
   async function removeSub(id: number) {
     try {
@@ -288,7 +291,7 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
                       检查
                     </button>
                     <button
-                      onClick={() => removeSub(sub.id)}
+                      onClick={() => setConfirmRemoveSub(sub.id)}
                       className="shrink-0 rounded-ctrl border border-ink/15 px-2 py-1.5 text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
                       title="删除订阅"
                     >
@@ -451,6 +454,20 @@ export default function SearchPage({ active, onGoResolve }: SearchPageProps) {
             </div>
         </Modal>
       )}
+
+      <ConfirmDialog
+        open={confirmRemoveSub != null}
+        danger
+        title="删除这个订阅？"
+        description="将停止定时检查；已下载的集数不受影响。"
+        confirmText="删除订阅"
+        onConfirm={() => {
+          const id = confirmRemoveSub;
+          setConfirmRemoveSub(null);
+          if (id != null) void removeSub(id);
+        }}
+        onCancel={() => setConfirmRemoveSub(null)}
+      />
     </div>
   );
 }

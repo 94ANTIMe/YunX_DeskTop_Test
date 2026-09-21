@@ -20,6 +20,7 @@ import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { errMsg, ipc, type DownloadTask } from "../lib/ipc";
 import { formatBytes, formatRemain, formatSpeed, platformLabel } from "../lib/format";
 import { clearLocalTasks, forgetTask, getSpeedHistory, useDownloadsState } from "../hooks/useDownloads";
+import Skeleton from "../components/ui/Skeleton";
 import type { TabId } from "../lib/tabs";
 import emptyArt from "../assets/art/empty-downloads.jpg";
 
@@ -197,7 +198,7 @@ const TaskCard = memo(function TaskCard({
 /** 下载页：聚合摘要条 + 任务列表 + 右侧详情抽屉（store 单例驱动，事件合并/采样在 useDownloads） */
 function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
   // 隐藏时快照恒定（零重渲染），激活即恢复最新任务列表
-  const { tasks } = useDownloadsState(active);
+  const { tasks, loaded } = useDownloadsState(active);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
@@ -253,14 +254,20 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
   const pauseTask = useCallback((id: number) => void act(id, () => ipc.pauseDownload(id)), [act]);
   const resumeTask = useCallback((id: number) => void act(id, () => ipc.resumeDownload(id)), [act]);
   const removeTask = useCallback(
+    (id: number) => setConfirmCancelId(id),
+    [],
+  );
+  const doRemoveTask = useCallback(
     (id: number) =>
       void act(id, async () => {
         await ipc.removeDownloadTask(id, false);
         forgetTask(id);
+        setConfirmCancelId(null);
       }),
     [act],
   );
   const searchSameFile = useCallback((filename: string) => setSearchModalFilename(filename), []);
+  const [confirmCancelId, setConfirmCancelId] = useState<number | null>(null);
   const openConfirmClear = useCallback(() => setConfirmClear(true), []);
 
   const openTask = openId != null ? (tasks.find((t) => t.id === openId) ?? null) : null;
@@ -284,7 +291,20 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
       )}
 
       <div className="space-y-3">
-        {tasks.length === 0 ? (
+        {!loaded ? (
+          [0, 1, 2].map((i) => (
+            <div key={i} className="rounded-card bg-carrier p-5">
+              <div className="flex items-center gap-3">
+                <Skeleton className="size-5 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <Skeleton className="h-3.5 w-1/3" />
+                  <Skeleton className="h-2.5 w-1/4" />
+                </div>
+              </div>
+              <Skeleton className="mt-4 h-1.5 w-full" rounded="full" />
+            </div>
+          ))
+        ) : tasks.length === 0 ? (
           <div className="rounded-card bg-carrier">
             <EmptyState
               image={emptyArt}
@@ -336,6 +356,19 @@ function DownloadPage({ active, onNavigate, onGoResolve }: DownloadPageProps) {
           void clearAll();
         }}
         onCancel={() => setConfirmClear(false)}
+      />
+
+      {/* 取消单个任务确认 */}
+      <ConfirmDialog
+        open={confirmCancelId != null}
+        danger
+        title="取消这个下载任务？"
+        description="将中断下载并移除任务记录；已下载的部分文件保留在本地。"
+        confirmText="取消任务"
+        onConfirm={() => {
+          if (confirmCancelId != null) void doRemoveTask(confirmCancelId);
+        }}
+        onCancel={() => setConfirmCancelId(null)}
       />
 
       {/* 跨网盘搜同款弹窗 */}

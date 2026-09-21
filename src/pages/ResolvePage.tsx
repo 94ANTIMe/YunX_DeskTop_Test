@@ -21,6 +21,7 @@ import BatchQueuePanel from "../components/BatchQueuePanel";
 import { errMsg, ipc, type Bookmark as BookmarkRow, type ResolveHistory, type ResolveSessionInfo, type ShareFile } from "../lib/ipc";
 import { toast } from "../lib/toast";
 import Modal from "../components/ui/Modal";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 import { formatBytes, platformLabel } from "../lib/format";
 import type { TabId } from "../lib/tabs";
 import resolveHero from "../assets/art/resolve-hero.jpg";
@@ -91,7 +92,10 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [page, setPage] = useState(1);
   const [resolving, setResolving] = useState(false);
   const [loadingDir, setLoadingDir] = useState(false);
-  const [downloadingFid, setDownloadingFid] = useState<string | null>(null);
+  const [downloadingFid, setDownloadingFid] = useState<Set<string>>(new Set());
+  // B3.1 多选批量下载：勾选当前目录文件 → 底部操作条一键取链入队（batchBusy 独立守卫）
+  const [selectedFids, setSelectedFids] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
   const [folderBusy, setFolderBusy] = useState<string | null>(null);
   /** 文件夹收集进度（收集 + 逐个取链入队） */
   const [folderProgress, setFolderProgress] = useState<{ name: string; done: number; total: number } | null>(null);
@@ -103,6 +107,8 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
   const [showTree, setShowTree] = useState(false);
   const [treeRoot, setTreeRoot] = useState<TreeNode | null>(null);
   const [searchModalFilename, setSearchModalFilename] = useState<string | null>(null);
+  /** 破坏性操作确认（B3.2）：kind 区分目标，id 为删除对象 */
+  const [confirmAsk, setConfirmAsk] = useState<{ kind: "bookmark" | "history-item" | "history-clear"; id?: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   /** 批量链接队列面板 */
   const [showBatch, setShowBatch] = useState(false);
@@ -161,6 +167,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       const info = await ipc.resolveShare(t, (pwdOverride ?? pwd).trim() || undefined);
       setSession(info);
       setFiles(info.files);
+      setSelectedFids(new Set());
       setHasMore(info.hasMore);
       setDirStack([{ fid: "0", name: info.title || "根目录" }]);
       // 初始化目录树根节点（懒加载子目录）
@@ -213,6 +220,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     try {
       const result = await ipc.listShareFiles(session.sessionKey, entry.fid, 1);
       setFiles(result.files);
+      setSelectedFids(new Set());
       setHasMore(result.hasMore);
       setDirStack((s) => [...s, { fid: entry.fid, name: entry.fname }]);
       setPage(1);
@@ -231,6 +239,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     try {
       const result = await ipc.listShareFiles(session.sessionKey, target.fid, 1);
       setFiles(result.files);
+      setSelectedFids(new Set());
       setHasMore(result.hasMore);
       setDirStack((s) => s.slice(0, index + 1));
       setPage(1);
@@ -303,6 +312,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
       const result = node.children ? { files: node.children.flatMap((child) => child.file ? [child.file] : []), hasMore: node.hasMore ?? false } : await loadTreeChildren(node);
       if (!result) return;
       setFiles(result.files);
+      setSelectedFids(new Set());
       setHasMore(result.hasMore);
       setDirStack(node.path);
       setPage(1);
@@ -352,10 +362,10 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     );
   }
 
-  // 单文件下载：取链 → 入队
+  // 单文件下载：取链 → 入队（放宽互斥：仅本行在飞时禁止重复点击，跨行可并行）
   async function downloadFile(file: ShareFile) {
-    if (!session || downloadingFid) return;
-    setDownloadingFid(file.fid);
+    if (!session || downloadingFid.has(file.fid)) return;
+    setDownloadingFid((prev) => new Set(prev).add(file.fid));
     try {
       const link = await ipc.getDownloadLink(session.sessionKey, file);
       await ipc.enqueueDownload(
@@ -372,7 +382,11 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     } catch (e) {
       toast.error(errMsg(e));
     } finally {
-      setDownloadingFid(null);
+      setDownloadingFid((prev) => {
+        const next = new Set(prev);
+        next.delete(file.fid);
+        return next;
+      });
     }
   }
 
@@ -418,6 +432,42 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
     } finally {
       setFolderBusy(null);
       setFolderProgress(null);
+    }
+  }
+
+  // 多选批量下载：逐个取链入队（串行取链防风控；batchBusy 独立于单行/文件夹守卫）
+  async function downloadSelected() {
+    if (!session || batchBusy || selectedFids.size === 0) return;
+    const targets = files.filter((f) => !f.isdir && selectedFids.has(f.fid));
+    if (targets.length === 0) return;
+    setBatchBusy(true);
+    try {
+      let done = 0;
+      let failed = 0;
+      for (const f of targets) {
+        try {
+          const link = await ipc.getDownloadLink(session.sessionKey, f);
+          await ipc.enqueueDownload(
+            link.url,
+            link.filename || f.fname,
+            link.headers,
+            link.platform,
+            link.cleanupId || undefined,
+            link.mirrors || undefined,
+            link.fetchCtx || undefined,
+          );
+          done++;
+        } catch {
+          failed++;
+        }
+      }
+      showNotice(`已入队 ${done} 个文件${failed > 0 ? `，${failed} 个失败（详见日志）` : ""}`);
+      if (done > 0) {
+        setSelectedFids(new Set());
+        onNavigate("download");
+      }
+    } finally {
+      setBatchBusy(false);
     }
   }
 
@@ -672,6 +722,22 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
             <ul className="divide-y divide-ink/10">
               {files.map((file) => (
                 <li key={file.fid} className="flex items-center gap-3 py-3">
+                  {!file.isdir && (
+                    <input
+                      type="checkbox"
+                      checked={selectedFids.has(file.fid)}
+                      onChange={(e) =>
+                        setSelectedFids((prev) => {
+                          const next = new Set(prev);
+                          if (e.currentTarget.checked) next.add(file.fid);
+                          else next.delete(file.fid);
+                          return next;
+                        })
+                      }
+                      aria-label={`选择 ${file.fname}`}
+                      className="size-4 shrink-0 cursor-pointer accent-clay"
+                    />
+                  )}
                   {file.isdir ? (
                     <FolderOpen size={18} className="shrink-0 text-clay" />
                   ) : (
@@ -699,25 +765,63 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                   )}
                   <button
                     onClick={() => (file.isdir ? downloadFolder(file) : downloadFile(file))}
-                    disabled={downloadingFid !== null || folderBusy !== null}
+                    disabled={
+                      folderBusy !== null ||
+                      batchBusy ||
+                      (file.isdir ? false : downloadingFid.has(file.fid))
+                    }
                     className="flex shrink-0 items-center gap-1.5 rounded-ctrl bg-clay px-3 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
                   >
                     {file.isdir ? (
                       folderBusy === file.fid ? <Loader2 size={13} className="animate-spin" /> : <ArrowDownToLine size={13} />
                     ) : (
-                      downloadingFid === file.fid ? <Loader2 size={13} className="animate-spin" /> : <ArrowDownToLine size={13} />
+                      downloadingFid.has(file.fid) ? <Loader2 size={13} className="animate-spin" /> : <ArrowDownToLine size={13} />
                     )}
                     {file.isdir
                       ? folderBusy === file.fid
                         ? "收集中…"
                         : "下载全部"
-                      : downloadingFid === file.fid
+                      : downloadingFid.has(file.fid)
                         ? "取链中…"
                         : "下载"}
                   </button>
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* 多选批量操作条（B3.1） */}
+          {selectedFids.size > 0 && (
+            <div className="animate-rise mt-3 flex flex-wrap items-center gap-3 rounded-ctrl bg-clay/10 px-4 py-2.5">
+              <span className="text-sm font-medium text-ink">
+                已选 {selectedFids.size} 项
+                <span className="ml-2 font-mono text-xs text-ink-soft">
+                  {formatBytes(
+                    files.filter((f) => selectedFids.has(f.fid)).reduce((sum, f) => sum + f.fsize, 0),
+                  )}
+                </span>
+              </span>
+              <button
+                onClick={() => setSelectedFids(new Set(files.filter((f) => !f.isdir).map((f) => f.fid)))}
+                className="cursor-pointer rounded-ctrl border border-ink/15 px-3 py-1 text-xs text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+              >
+                全选本页
+              </button>
+              <button
+                onClick={() => setSelectedFids(new Set())}
+                className="cursor-pointer rounded-ctrl border border-ink/15 px-3 py-1 text-xs text-ink-soft transition-colors hover:border-clay hover:text-clay-deep"
+              >
+                清除
+              </button>
+              <button
+                onClick={() => void downloadSelected()}
+                disabled={batchBusy || folderBusy !== null}
+                className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-ctrl bg-clay px-4 py-1.5 text-xs font-semibold text-on-accent transition-colors hover:bg-clay-deep disabled:opacity-50"
+              >
+                {batchBusy ? <Loader2 size={13} className="animate-spin" /> : <ArrowDownToLine size={13} />}
+                {batchBusy ? "取链中…" : "下载选中"}
+              </button>
+            </div>
           )}
 
           {/* 加载更多 */}
@@ -768,7 +872,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                         解析
                       </button>
                       <button
-                        onClick={() => removeBookmark(b.id)}
+                        onClick={() => setConfirmAsk({ kind: "bookmark", id: b.id })}
                         className="shrink-0 rounded-ctrl p-1.5 text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
                         title="删除收藏"
                       >
@@ -793,7 +897,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
               <h3 className="font-display text-lg font-semibold text-ink">解析记录</h3>
               {history.length > 0 && (
                 <button
-                  onClick={clearHistory}
+                  onClick={() => setConfirmAsk({ kind: "history-clear" })}
                   className="cursor-pointer rounded-ctrl px-2.5 py-1 text-xs text-ink-soft transition-colors hover:bg-clay/10 hover:text-clay-deep"
                 >
                   清空记录
@@ -829,7 +933,7 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
                         再解析
                       </button>
                       <button
-                        onClick={() => removeHistory(h.id)}
+                        onClick={() => setConfirmAsk({ kind: "history-item", id: h.id })}
                         className="shrink-0 rounded-ctrl p-1.5 text-ink-soft hover:bg-clay/10 hover:text-clay-deep"
                         title="删除记录"
                       >
@@ -841,6 +945,28 @@ export default function ResolvePage({ onNavigate, pending, onPendingConsumed }: 
               )}
         </Modal>
       )}
+
+      {/* 破坏性操作确认（删除收藏 / 删除记录 / 清空记录） */}
+      <ConfirmDialog
+        open={confirmAsk != null}
+        danger
+        title={confirmAsk?.kind === "bookmark" ? "删除这条收藏？" : confirmAsk?.kind === "history-clear" ? "清空全部解析记录？" : "删除这条解析记录？"}
+        description={
+          confirmAsk?.kind === "history-clear"
+            ? "将删除全部解析历史（含标题与链接），不可恢复。"
+            : "删除后不可恢复。"
+        }
+        confirmText={confirmAsk?.kind === "history-clear" ? "全部清空" : "删除"}
+        onConfirm={() => {
+          const ask = confirmAsk;
+          setConfirmAsk(null);
+          if (!ask) return;
+          if (ask.kind === "bookmark" && ask.id != null) void removeBookmark(ask.id);
+          else if (ask.kind === "history-item" && ask.id != null) void removeHistory(ask.id);
+          else if (ask.kind === "history-clear") void clearHistory();
+        }}
+        onCancel={() => setConfirmAsk(null)}
+      />
 
       {/* 批量链接队列抽屉 */}
       <BatchQueuePanel
