@@ -23,6 +23,7 @@
 - 本地 commit 已到 `093aa69` 及文档提交，**均未 push**；全程未升版本号。
 - 已知暂缓项（按需再立项）：① ipc.ts 分域与 ResolvePage 区块深拆（理由见 ADR-0007 执行结果注记）；② LoginDialog 壳未迁 ui/Modal（WebView 登录）；③ 各平台真机解析/下载抽测未做。
 - 若用户真机复测夸克打回：按时间轴 A 线条目的预案插小型修复批次（单独 commit）。
+- 🔴 **进行中（阻塞在用户侧）：发布 v0.5.2**。已完成：版本三处同步（`21905fd`）、push main+tag。CI 修了三层后仍失败在**签名 Secrets 缺失**：仓库需配置 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（公钥在 19850c6 已入 tauri.conf.json，密钥对应私钥应由 09-09 v0.5.1 发布准备时生成，用户侧查找）。**Secrets 配好后**：GitHub 该失败 run 点「Re-run failed jobs」或让我删 tag 重推即可继续。CI 历史修复（全入档 decisions.md）：① publish job env 引用 env 上下文 → Invalid workflow file（15e1fb3）；② pnpm 9 不兼容 allowBuilds workspace → pnpm 升 11（44392b8）；③ Node 20 → pnpm 11 需 node:sqlite → Node 升 22（3cf5b48）。
 - 2026-09-22 10:14 重新打包（含 A+B+C 三线全部改动，基线 `0980401`）并静默安装 D:\YunX：`yunx-desktop.exe` 体积 21211648 → 21240320 字节、时间戳 Sep 22 02:04 → Sep 22 10:13（NSIS 保留打包内 mtime=构建时刻），安装校验通过。此前断点/时间轴提到的「装机 02:04」为 A 线单批次旧包，已被覆盖。
 - 2026-09-22 10:34 发现用户侧同时跑了 3 个云析实例（应用无单实例保护），日志「失联恢复」连发即此因；且 10:33 那次安装因实例锁文件被静默跳过。已修复重挂加在途互斥（`0cf0874`）并在实例退出后重装：D:\YunX 主程序 21238784 字节、时间戳 10:32，校验通过。**待立项：tauri-plugin-single-instance 单实例保护（新增依赖，需用户授权）。**
 - 2026-09-22 13:58 **最终根因定案**：用户重 join 后依旧「排队中 0%」，实测引擎里任务 active 6.2MB/s、而 DB 永远 0 —— 定位到 `tell_status_batch` 的 **multicall 双重注入 token**（rpc_call_raw 自动在外层再包一个 token 字符串，aria2 报 "parameter at 0 has wrong type"，批量查询自实现以来从未成功过）。修复 `32eff23`（rpc_post_raw 直发 + build_multicall_body 纯函数 + 结构回归测试）。装机 13:58 版并启动验证：DB 实时更新（5 秒 72MB→107MB）、状态=1 下载中、旧任务 1391 正确转「已完成」。**用户所有历史症状（排队冻结/很神奇/容量爆满）的最底层根因即此。**
