@@ -43,6 +43,8 @@
 
 ## 变更记录
 
+- **2026-09-22 · 修复批量状态查询 multicall 双重注入 token（「夸克无法下载」最深层根因）**：`rpc_call_raw` 自动在参数首注入 token，而 `tell_status_batch` 的子调用已各自带 token——外层再叠一个 token 字符串后，aria2 对 system.multicall 报 "The parameter at 0 has wrong type" **整体失败**。后果链：轮询从未拿到过任何真实状态 → 界面永久冻结在入库初始状态（排队中 0%）→ 用户以「暂停开始」触发 resume 的重入队+强写状态造成「很神奇」假象 → 完成态/失败态/清理动作全部失灵（转存临时目录不清理 → 容量爆满的深层原因之一）。修复：`tell_status_batch` 改走 `rpc_post_raw` 直发（不经自动注入），请求体构造抽 `build_multicall_body` 纯函数并以结构回归测试锁定。行为变化：界面状态首次与引擎真实状态同步（下载中/完成/失败都会如实显示），夸克转存清理将在完成时正常触发。兼容性：纯修复，无数据/契约变化。
+
 - **2026-09-22 · aria2 引擎禁用 IPv6（真机实测修复）**：用户环境 CDN 域名解析出 IPv6（240e:…）但本机 IPv6 无路由，aria2 不做 IPv4 回退（与 curl 的 happy-eyeballs 不同），WSAENETUNREACH 直接判死全部下载；引擎 spawn 参数固定加 `--disable-ipv6=true`（aria2 走 IPv4）。行为变化：引擎不再尝试 IPv6 直连（国内家庭网络 IPv6 半通为常态，纯收益）。应用其余网络路径（reqwest）自带回退不受影响。关联症状链：下载反复「网络不可达」→ 失联重挂每 10s 重试（重挂互斥 `0cf0874` 已抑制重复触发）。
 
 - **2026-09-22 · 后端解耦（C 线）：凭据下沉、平台 trait 化、aria2/models 分域**：`credentials.rs` 承接账号凭据读取（api 层对 resolve 反向引用清零，api↔resolve 环斩断）；`resolve.rs` 定义 `PanPlatform` trait（fill_session/list_files/fetch_link，原生 async fn 静态分发，无新依赖），9/9 平台编排体从三段巨型 match 迁入各自 impl（新增平台 = 落接口 + impl + 三行注册）；`api/mod.rs` 上提 `set_cookies`/`refresh_puus_session`（quark/uc 会话刷新去重）；`aria2.rs`（1810 行）拆 `aria2/{policy,rpc,engine,mod=tasks}` 四模块，statics 随域归位；`models.rs`（420 行）拆 `models/{platform,resolve,download,account,settings,search}` 六域。行为零变化、IPC 字段与 DB 结构不动，外部调用路径经再导出保持不变。暂缓项与理由见 ADR-0007 执行结果注记。兼容性：纯结构重构，无数据/契约变化。
