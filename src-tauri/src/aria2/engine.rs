@@ -141,6 +141,9 @@ pub(crate) static HEAL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 pub(crate) static LAST_RESPAWN: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
 /// 重挂冷却：poll 检测到 gid 失联后避免连续重挂风暴
 pub(crate) static LAST_REMOUNT: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
+/// 重挂在途互斥：恢复本身（逐任务刷新直链）可能耗时远超冷却时长，
+/// 时间戳冷却覆盖不了其全程，这里保证任一时刻至多一次恢复在途
+static REMOUNT_INFLIGHT: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub(crate) fn heal_lock() -> &'static tokio::sync::Mutex<()> {
     HEAL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -196,6 +199,13 @@ pub(crate) async fn remount_if_detached(app: &AppHandle, unknown_active: usize, 
         }
         *last = Some(std::time::Instant::now());
     }
+    // 恢复在途 → 静默跳过（上一轮恢复可能仍在逐任务刷新直链）
+    let Ok(_inflight) = REMOUNT_INFLIGHT
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+    else {
+        return;
+    };
     engine_log(app, "remount_if_detached: 活跃任务与引擎失联，自动重挂");
     let state = app.state::<AppState>();
     state.log(crate::logger::INFO, "aria2", "engine", "检测到任务与引擎失联，正在恢复下载任务", "");
