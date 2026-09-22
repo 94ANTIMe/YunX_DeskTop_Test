@@ -618,13 +618,12 @@ async fn tell_status_batch(gids: &[String]) -> Vec<Option<TaskStatus>> {
     if gids.is_empty() {
         return Vec::new();
     }
-    let secret = format!("token:{}", rpc_secret());
-    let calls: Vec<Value> = gids
-        .iter()
-        .map(|gid| json!({ "methodName": "aria2.tellStatus", "params": [secret, gid] }))
-        .collect();
-    match rpc_call("system.multicall", vec![json!(calls)]).await {
-        Ok(Value::Array(results)) if results.len() == gids.len() => results
+    // multicall 的子调用各自带 token，必须绕过 rpc_call 的自动外层 token 直发
+    // （外层多出的 token 字符串会让 aria2 报 wrong type 并整体失败——
+    //  这就是「界面状态永远冻结在排队中」的根因，详见 build_multicall_body 注释）
+    let body = build_multicall_body(&rpc_secret(), gids);
+    match rpc_post_raw(&body).await {
+        Some(Value::Array(results)) if results.len() == gids.len() => results
             .into_iter()
             .map(|entry| match entry {
                 Value::Array(inner) => inner.into_iter().next().map(|v| parse_status(&v)),

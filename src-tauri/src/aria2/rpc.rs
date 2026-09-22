@@ -178,3 +178,57 @@ pub(crate) async fn rpc_call(method: &str, params: Vec<Value>) -> AppResult<Valu
     }
 }
 
+/// 发送已完整构好的 JSON-RPC 请求体（不做任何 token 处理），返回 result 或 None。
+/// 供 system.multicall 等「子调用自带 token」的调用使用——外层再注入 token 会污染参数
+/// （aria2 报 "The parameter at 0 has wrong type"，批量查询整体失败）。
+pub(crate) async fn rpc_post_raw(body: &Value) -> Option<Value> {
+    let resp = rpc_http()
+        .post(rpc_url())
+        .timeout(std::time::Duration::from_secs(10))
+        .json(body)
+        .send()
+        .await
+        .ok()?;
+    let text = resp.text().await.ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    Some(v.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// 构造 system.multicall 请求体（纯函数，测试锁定结构）：
+/// params[0] 必须是「调用数组」本身，每个子调用自带 token；
+/// 外层绝不能再叠 token（rpc_call 的自动注入对 multicall 是致命的）。
+pub(crate) fn build_multicall_body(secret: &str, gids: &[String]) -> Value {
+    let calls: Vec<Value> = gids
+        .iter()
+        .map(|gid| json!({ "methodName": "aria2.tellStatus", "params": [format!("token:{secret}"), gid] }))
+        .collect();
+    json!({
+        "jsonrpc": "2.0",
+        "id": "yunx-batch",
+        "method": "system.multicall",
+        "params": [calls],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_multicall_body;
+
+    #[test]
+    fn multicall_body_keeps_calls_array_at_param0_without_envelope_token() {
+        let body = build_multicall_body("sek", &["g1".to_string(), "g2".to_string()]);
+        assert_eq!(body["method"], "system.multicall");
+        let params = body["params"].as_array().unwrap();
+        // 外层只能有「调用数组」一个参数——多出的 token 字符串会让 aria2 报 wrong type
+        assert_eq!(params.len(), 1);
+        let calls = params[0].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["methodName"], "aria2.tellStatus");
+        assert_eq!(calls[0]["params"][0], "token:sek");
+        assert_eq!(calls[0]["params"][1], "g1");
+    }
+}
+
