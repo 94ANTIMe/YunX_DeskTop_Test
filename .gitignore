@@ -26,9 +26,14 @@ dist-ssr
 
 # Rust / Tauri build artifacts（不提交脚手架生成物与编译产物）
 /src-tauri/target/
-/src-tauri/gen/schemas/
-/src-tauri/gen/android/
+/src-tauri/gen/
+/src-tauri/icons/ios/
+/src-tauri/icons/android/
 *.pdb
+
+# 项目内部文档（AI 协作流程文档，不上传）
+/docs/
+/.github/
 
 # 本地打包/调试日志
 build-log.txt
