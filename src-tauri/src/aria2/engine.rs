@@ -249,6 +249,9 @@ pub(crate) async fn spawn_sidecar(app: &AppHandle) -> bool {
                 format!("--rpc-secret={}", rpc_secret()),
                 format!("--dir={}", download_dir.display()),
                 "--continue=true".to_string(),
+                // 本机 IPv6 无路由时 aria2 不回退 IPv4（WSAENETUNREACH 直接失败），
+                // 而国内家庭网络 IPv6 半通是常态——引擎固定走 IPv4（ADR-0007 后的实测修复）
+                "--disable-ipv6=true".to_string(),
                 format!("--max-concurrent-downloads={}", settings.max_concurrent_downloads.max(1)),
                 format!("--split={}", settings.download_threads.clamp(1, 64)),
                 format!("--max-connection-per-server={}", settings.download_conn_per_server.clamp(1, 16)),
