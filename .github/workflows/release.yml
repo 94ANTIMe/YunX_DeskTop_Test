@@ -43,7 +43,9 @@ jobs:
       - name: 启用 pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          # 与本地/lockfile 生成环境保持一致（pnpm 9 不兼容无 packages 字段的
+          # pnpm-workspace.yaml，pnpm install --frozen-lockfile 秒失败）
+          version: 11
 
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
