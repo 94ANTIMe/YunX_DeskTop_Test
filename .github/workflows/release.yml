@@ -145,7 +145,8 @@ jobs:
     needs: build
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     env:
-      TAG_NAME: ${{ env.RELEASE_TAG }}
+      # job 级 env 上下文不可引用 env（校验失败零 job），直接内联同一表达式
+      TAG_NAME: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.version }}
       GH_REPO: ${{ github.repository }}
     steps:
       - name: 检出代码
