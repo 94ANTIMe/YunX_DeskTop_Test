@@ -27,10 +27,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装 Node 20
+      - name: 安装 Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # pnpm 11 要求 Node ≥22.13（node:sqlite 内置模块）
+          node-version: 22
 
       - name: 安装 Rust（稳定版）
         uses: dtolnay/rust-toolchain@stable
