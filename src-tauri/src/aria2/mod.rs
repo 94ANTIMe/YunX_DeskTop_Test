@@ -675,6 +675,7 @@ async fn poll_loop(app: AppHandle) {
     let mut last_tray: (usize, i64) = (0, 0);
     let mut last_tray_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut interval_secs = 1u64;
+    let mut remount_strikes = 0u32;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
         let state = app.state::<AppState>();
@@ -747,13 +748,21 @@ async fn poll_loop(app: AppHandle) {
             .collect();
         let batch = tell_status_batch(&active_gids).await;
         // 引擎换代（崩溃自愈 / 进程被杀）会让所有活跃 gid 失联：后台触发重挂，
-        // 期间界面短暂保持 DB 状态，重挂完成后按新 gid 继续轮询
+        // 期间界面短暂保持 DB 状态，重挂完成后按新 gid 继续轮询。
+        // 大文件满速下载时引擎 RPC 偶发超时会让整批查询失败——单次失败不计，
+        // 连续 3 轮全部失联才判定换代（否则高速下载期会每 10 秒误报一次重挂）。
         let unknown_active = batch.iter().filter(|x| x.is_none()).count();
         let active_total = active_gids.len();
-        if unknown_active > 0 {
+        if active_total > 0 && unknown_active == active_total {
+            remount_strikes += 1;
+        } else {
+            remount_strikes = 0;
+        }
+        if remount_strikes >= 3 {
+            remount_strikes = 0;
             let app2 = app.clone();
             tauri::async_runtime::spawn(async move {
-                remount_if_detached(&app2, unknown_active, active_total).await;
+                remount_if_detached(&app2).await;
             });
         }
         let mut status_iter = batch.into_iter();

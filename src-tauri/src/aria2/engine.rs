@@ -15,7 +15,7 @@ use super::rpc::{
 };
 use super::policy::{build_proxy_arg, limit_str, proxy_configured, proxy_log_summary};
 use super::{poll_loop, torrent_options, refreshed_target};
-use super::{add_to_aria2, update_status};
+use super::{add_to_aria2, tell_status_mapped, update_status};
 
 /// 全球活跃度最高的高速公共 BitTorrent Tracker 列表（定期自愈注入）
 pub const DEFAULT_BT_TRACKERS: &str = "\
@@ -177,13 +177,7 @@ pub(crate) async fn respawn_engine(app: &AppHandle) -> bool {
 /// 引擎健康但活跃任务 gid 全部失联（引擎进程被换过）→ 复用启动恢复逻辑重挂。
 /// 不在 respawn_engine 里做：自愈发生在 rpc_call 内部，原地重挂会与原请求的重试 addUri
 /// 撞车造成同一任务双入队；poll 触发点没有在途 addUri，且复用 live gid 复检天然幂等。
-pub(crate) async fn remount_if_detached(app: &AppHandle, unknown_active: usize, active_total: usize) {
-    if active_total == 0 || unknown_active == 0 {
-        return;
-    }
-    if unknown_active < active_total {
-        return; // 个别失联可能是任务刚结束，全部失联才判定引擎换代
-    }
+pub(crate) async fn remount_if_detached(app: &AppHandle) {
     if rpc_call_raw("aria2.getVersion", vec![]).await.is_err() {
         return; // 引擎不健康：交给 rpc_call 自愈，下一轮 poll 再触发
     }
@@ -454,8 +448,13 @@ pub(crate) async fn resume_pending_tasks(app: &AppHandle) {
             resume_torrent_task(app, id).await;
             continue;
         }
-        // 引擎仍在处理该任务（复用存活实例 / 热重启）：保持原 gid 绑定即可
+        // 引擎仍在处理该任务（复用存活实例 / 热重启）：保持原 gid 绑定即可。
+        // 批量查询撞上引擎繁忙可能整批误判失联，重挂前对每个任务单发一次
+        // tellStatus 复核——引擎认识它（active/waiting/stopped 任意态）就不动。
         if !gid.is_empty() && live.contains(&gid) {
+            continue;
+        }
+        if !gid.is_empty() && tell_status_mapped(&gid).await.is_some() {
             continue;
         }
         let headers: Vec<(String, String)> =
