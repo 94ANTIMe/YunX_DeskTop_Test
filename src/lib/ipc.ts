@@ -363,7 +363,8 @@ export const ipc = {
   /** 切换平台当前选中账号 */
   switchAccount: (platform: string, key: string) =>
     invoke<void>("switch_account", { platform, key }),
-  logout: (platform: string, key?: string) => invoke<void>("logout", { platform, key }),
+  /** 登出（key 空 = 登出当前选中账号；Rust 侧 key 为必填 String，空串命中「登出当前账号」分支） */
+  logout: (platform: string, key?: string) => invoke<void>("logout", { platform, key: key ?? "" }),
   /** 代理连通性测试（真实出口 IP 探测） */
   testProxy: () => invoke<ProxyTestResult>("test_proxy"),
   /** PanSou 服务连通性检测 */
