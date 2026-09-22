@@ -48,7 +48,13 @@ jobs:
           version: 11
 
       - name: 安装前端依赖
-        run: pnpm install --frozen-lockfile
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile --reporter=append-only 2>&1 | Tee-Object -FilePath pnpm-install.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content pnpm-install.log -Tail 50 | ForEach-Object { Write-Host "::error::$_" }
+            exit $LASTEXITCODE
+          }
 
       - name: 校验更新签名密钥
         shell: pwsh
