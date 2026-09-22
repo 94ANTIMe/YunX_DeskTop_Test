@@ -100,11 +100,25 @@ jobs:
           Write-Host "已注入代码签名配置"
 
       - name: 构建安装包（Tauri）
-        run: pnpm tauri build --verbose
+        id: tauri-build
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build --verbose 2>&1 | Tee-Object -FilePath tauri-build.log
+          $code = $LASTEXITCODE
+          Write-Host "exit code: $code"
+          exit $code
+
+      - name: 失败时留存构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-build-log
+          path: tauri-build.log
+          if-no-files-found: ignore
 
       - name: 校验签名产物并生成 latest.json
         shell: pwsh
